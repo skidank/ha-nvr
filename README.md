@@ -1,20 +1,20 @@
 # NVR Browser
 
-A purpose-built Home Assistant sidebar panel for browsing the home-grown
-`www/nvr` motion clips — a flat, newest-first thumbnail gallery with camera and
-object filters, replacing the painful Media-browser folder drill-down.
+A purpose-built Home Assistant sidebar panel for browsing the home-grown NVR
+motion clips in `/config/nvr` — a flat, newest-first thumbnail gallery with
+camera and object filters, replacing the painful Media-browser folder drill-down.
 
 It is **read-only and additive**: it never touches the recording automations or
-any file under `www/nvr`. Thumbnails are cached to a separate dir
+any file under `/config/nvr`. Thumbnails are cached to a separate dir
 (`/config/nvr_thumbs`).
 
 ## What it does
 
 - **Flat newest-first feed** of every clip across all cameras, infinite-scroll.
-- **Filter chips** by camera (backyard, driveway, deepyard, porch, sidewalk) and
-  by detected object (person, cat, …), derived from the existing folder layout.
-- **Thumbnails** generated on demand by the container's bundled `ffmpeg`
-  (`-ss 1`, scaled to 320px), cached to disk, throttled to 3 concurrent grabs.
+- **Filter chips** by camera and by detected object (person, cat, …), both
+  derived from the existing folder layout (one chip per camera/object folder).
+- **Thumbnails** generated on demand by Home Assistant's bundled `ffmpeg`
+  (seeks ~10s in, scaled to 320px), cached to disk, throttled to 3 concurrent grabs.
 - **Click to play** inline in a lightbox, with a download link.
 
 ## How it reads the tree
@@ -28,43 +28,59 @@ The recording automations produce two shapes per hour folder:
 
 The integration joins them on `(time, camera)`: a folder whose files match
 `HH:MM:SS.mp4` is a camera; a folder whose files match `HH:MM:SS-<camera>.mp4`
-is an object label. Playback always uses the canonical clip via the existing
-`/local/nvr/...` static route, so no extra video serving is added.
+is an object label. Playback always uses the canonical clip, streamed via the
+authed `/api/nvr_browser/clip` endpoint (clips live outside `www/`, so they are
+not exposed by HA's unauthenticated `/local/` route).
 
 ## Endpoints
 
 - `GET /api/nvr_browser/events?offset=&limit=&camera=&object=` — authed JSON list.
-- `GET /api/nvr_browser/thumb?path=<rel>` — JPEG thumbnail (unauthed, so it works
-  as a plain `<img src>`; path is sanitised against traversal).
+- `GET /api/nvr_browser/thumb?path=<rel>` — JPEG thumbnail (authed; the events
+  view hands the frontend short-lived signed URLs so a plain `<img src>` still
+  works only for the logged-in user; path is sanitised against traversal).
+- `GET /api/nvr_browser/clip?path=<rel>` — original clip stream (authed, signed
+  the same way; supports HTTP range requests for `<video>` seeking). Replaces the
+  old public `/local/nvr/...` route.
 
-## Deploy (to the live HA, when ready)
+## Requirements
 
-The HA container only mounts `/config` (and `/share`), so a symlink into this dev
-dir would dangle inside the container. **Copy** the component instead:
+- A Home Assistant install whose config directory is `/config` — HAOS,
+  Supervised, or the official Container image. Paths are hardcoded to
+  `/config/nvr` and `/config/nvr_thumbs`, so a Core/venv install with a
+  different config path won't work as-is.
+- `ffmpeg` available to Home Assistant (bundled on HAOS / Supervised / Container).
+- Your motion clips already under `/config/nvr/` in the layout above (your
+  recording automations must write there, **not** under `www/`).
 
-```bash
-cp -r ~/ha-integrations/nvr_browser/custom_components/nvr_browser \
-      ~/services/home-assistant/custom_components/
-```
+## Installation
 
-Then enable it by adding one line to `configuration.yaml`:
+### HACS
+
+1. In HACS, open the ⋮ menu → **Custom repositories**.
+2. Add this repository's URL with category **Integration**, then download
+   **NVR Browser**.
+3. Restart Home Assistant.
+
+### Manual
+
+Copy `custom_components/nvr_browser/` into your Home Assistant
+`config/custom_components/` directory and restart Home Assistant.
+
+## Configuration
+
+Enable the integration with one line in `configuration.yaml`:
 
 ```yaml
 nvr_browser:
 ```
 
-Restart Home Assistant:
+Restart Home Assistant. An **NVR** item (cctv icon) then appears in the sidebar.
 
-```bash
-podman container stop -t 120 home-assistant   # systemd restart=unless-stopped brings it back
-# or: systemctl restart <your home-assistant unit>
-```
+## Removal
 
-After restart an **NVR** item (cctv icon) appears in the sidebar.
-
-To remove: delete the `nvr_browser:` line, delete
-`custom_components/nvr_browser`, restart, and optionally `rm -rf
-/config/nvr_thumbs` (the thumbnail cache, safe to delete anytime).
+Remove the `nvr_browser:` line from `configuration.yaml`, uninstall via HACS (or
+delete `custom_components/nvr_browser`), and restart Home Assistant. The
+thumbnail cache at `/config/nvr_thumbs` is safe to delete anytime.
 
 ## Thumbnail cache cleanup
 

@@ -1,0 +1,33 @@
+name: Validate
+
+# Validates the repo the way HACS and Home Assistant do, so packaging breakage
+# (bad manifest, missing hacs.json, etc.) is caught on every change rather than
+# at install time. The weekly schedule catches upstream rule changes.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  hacs:
+    name: HACS
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hacs/action@main
+        with:
+          category: integration
+          # 'brands' is only needed for the default HACS store / a custom icon;
+          # a custom-repository install doesn't require it. To get an icon (and
+          # default-store eligibility) later, submit to home-assistant/brands.
+          ignore: brands
+
+  hassfest:
+    name: Hassfest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@master

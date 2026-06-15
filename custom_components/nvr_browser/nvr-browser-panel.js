@@ -1,4 +1,4 @@
-// NVR Browser — flat newest-first gallery panel for the home-grown www/nvr clips.
+// NVR Browser — flat newest-first gallery panel for the home-grown /config/nvr clips.
 // Vanilla custom element (no build step). HA injects `hass`; we use hass.callApi
 // for the authed event list and plain <img>/<video> for thumbs/playback.
 
@@ -16,6 +16,13 @@ class NvrBrowserPanel extends HTMLElement {
     this._object = "";
     this._start = "";   // inclusive YYYY-MM-DD, "" = no lower bound
     this._end = "";     // inclusive YYYY-MM-DD, "" = no upper bound
+    this._dayList = [];
+    this._daySet = new Set();
+    this._minDay = "";       // oldest available day (lower bound for the picker)
+    this._maxDay = "";       // newest available day (upper bound for the picker)
+    this._viewMonth = null;  // {y, m} month currently shown in the calendar popup
+    this._pickStart = "";    // first-click anchor while picking a range
+    this._calOpen = false;
     this._cameras = new Set();
     this._objects = new Set();
     this._booted = false;
@@ -43,9 +50,36 @@ class NvrBrowserPanel extends HTMLElement {
                 font-size: 13px; background: transparent; color: inherit; line-height: 1.5; }
         .chip.on { background: #fff; color: #000; border-color: #fff; }
         .label { opacity: .7; font-size: 12px; text-transform: uppercase; letter-spacing: .5px; margin: 0 2px 0 6px; }
-        .date { background: rgba(255,255,255,.12); color: inherit; border: 1px solid rgba(255,255,255,.35);
-                border-radius: 6px; padding: 3px 6px; font-size: 13px; color-scheme: dark; }
-        .dash { opacity: .6; }
+        .sel { background: rgba(255,255,255,.12); color: inherit; border: 1px solid rgba(255,255,255,.35);
+               border-radius: 6px; padding: 3px 6px; font-size: 13px; color-scheme: dark; }
+        .calwrap { position: relative; display: inline-flex; }
+        .iconbtn { cursor: pointer; border: 1px solid rgba(255,255,255,.35); border-radius: 6px;
+                   padding: 3px 8px; font-size: 13px; line-height: 1.4; background: rgba(255,255,255,.12); color: inherit; }
+        .iconbtn.on { background: #fff; border-color: #fff; }
+        .cal { position: absolute; top: calc(100% + 6px); left: 0; z-index: 20; width: 236px;
+               background: #1f1f1f; color: #e1e1e1; border: 1px solid rgba(255,255,255,.18);
+               border-radius: 10px; padding: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.5); }
+        .cal[hidden] { display: none; }
+        .calhd { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+        .calmon { font-size: 13px; font-weight: 600; }
+        .navbtn { cursor: pointer; background: transparent; border: 1px solid rgba(255,255,255,.25);
+                  color: inherit; border-radius: 6px; padding: 2px 8px; font-size: 13px; }
+        .calgrid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+        .calwk .wd { text-align: center; font-size: 11px; opacity: .55; padding: 2px 0; }
+        .caldays { margin-top: 2px; }
+        .day { cursor: pointer; background: transparent; border: 1px solid transparent; color: inherit;
+               border-radius: 6px; padding: 4px 0; font-size: 12px; position: relative;
+               font-variant-numeric: tabular-nums; }
+        .day.empty { visibility: hidden; cursor: default; }
+        .day:hover:not(.disabled):not(.empty) { background: rgba(255,255,255,.12); }
+        .day.has::after { content: ""; position: absolute; bottom: 3px; left: 50%; transform: translateX(-50%);
+                          width: 3px; height: 3px; border-radius: 50%; background: #6cb6ff; }
+        .day.inrange { background: rgba(108,182,255,.18); }
+        .day.sel { background: #6cb6ff; color: #000; border-color: #6cb6ff; }
+        .day.sel.has::after { background: #000; }
+        .day.disabled { opacity: .25; cursor: default; }
+        .calft { margin-top: 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+        .calhint { font-size: 11px; opacity: .5; }
         .btn { cursor: pointer; border: 1px solid rgba(255,255,255,.35); border-radius: 6px; padding: 4px 10px;
                background: transparent; color: inherit; font-size: 13px; }
         .grid { display: grid; gap: 12px; padding: 14px;
@@ -75,10 +109,12 @@ class NvrBrowserPanel extends HTMLElement {
       </style>
       <div class="bar">
         <span class="title">NVR</span>
-        <span class="label">Day</span><div class="chips" id="days"></div>
-        <input type="date" class="date" id="from" title="From (inclusive)">
-        <span class="dash">&ndash;</span>
-        <input type="date" class="date" id="to" title="To (inclusive)">
+        <span class="label">Day</span>
+        <select class="sel" id="day" title="Jump to a day"></select>
+        <div class="calwrap">
+          <button class="iconbtn" id="calbtn" title="Pick a date range" aria-haspopup="true">📅</button>
+          <div class="cal" id="cal" hidden></div>
+        </div>
         <span class="label">Camera</span><div class="chips" id="cams"></div>
         <span class="label">Object</span><div class="chips" id="objs"></div>
         <span class="spacer"></span>
@@ -95,17 +131,23 @@ class NvrBrowserPanel extends HTMLElement {
 
     this._grid = this.shadowRoot.getElementById("grid");
     this._status = this.shadowRoot.getElementById("status");
-    this._days = this.shadowRoot.getElementById("days");
+    this._day = this.shadowRoot.getElementById("day");
+    this._calbtn = this.shadowRoot.getElementById("calbtn");
+    this._cal = this.shadowRoot.getElementById("cal");
     this._cams = this.shadowRoot.getElementById("cams");
     this._objs = this.shadowRoot.getElementById("objs");
-    this._from = this.shadowRoot.getElementById("from");
-    this._to = this.shadowRoot.getElementById("to");
     this._lb = this.shadowRoot.getElementById("lb");
     this._lbv = this.shadowRoot.getElementById("lbv");
     this._lbi = this.shadowRoot.getElementById("lbi");
 
-    this._from.addEventListener("change", () => this._onRangeInput());
-    this._to.addEventListener("change", () => this._onRangeInput());
+    this._day.addEventListener("change", () => this._onDaySelect());
+    this._calbtn.addEventListener("click", () => this._toggleCalendar());
+    // click anywhere outside the popup (or its button) closes it
+    document.addEventListener("click", (e) => {
+      if (!this._calOpen) return;
+      const path = e.composedPath();
+      if (!path.includes(this._cal) && !path.includes(this._calbtn)) this._closeCalendar();
+    });
     this.shadowRoot.getElementById("refresh").addEventListener("click", () => this._reset());
     this.shadowRoot.getElementById("lbx").addEventListener("click", () => this._closeLightbox());
     this._lb.addEventListener("click", (e) => { if (e.target === this._lb) this._closeLightbox(); });
@@ -125,40 +167,47 @@ class NvrBrowserPanel extends HTMLElement {
     try {
       const data = await this._hass.callApi("GET", "nvr_browser/days");
       const days = (data && data.days) || [];
-      if (days.length) {
-        // bound the native pickers to what actually exists
-        this._from.max = this._to.max = days[0];
-        this._from.min = this._to.min = days[days.length - 1];
-      }
       this._dayList = days;
-      this._renderDays(days);
+      this._daySet = new Set(days);
+      if (days.length) {
+        this._maxDay = days[0];                 // newest-first
+        this._minDay = days[days.length - 1];
+      }
+      this._syncDateControls();
     } catch (err) {
-      /* day chips are a convenience; ignore failures */
+      /* the date controls are a convenience; ignore failures */
     }
   }
 
-  _renderDays(days) {
-    this._dayList = days;
-    this._days.innerHTML = "";
-    const mk = (label, value) => {
-      const c = document.createElement("button");
-      // a day chip is "on" only when the range is exactly that single day
-      const on = value ? this._start === value && this._end === value
-                       : !this._start && !this._end;
-      c.className = "chip" + (on ? " on" : "");
-      c.textContent = label;
-      c.addEventListener("click", () => {
-        if (value) { this._start = this._end = value; }
-        else { this._start = this._end = ""; }
-        this._from.value = this._start;
-        this._to.value = this._end;
-        this._renderDays(days);
-        this._reset();
-      });
-      return c;
+  // Rebuild the Day <select> from the available days and reflect the current
+  // start/end selection. The dropdown handles single-day jumps ("All days" or
+  // one day); a multi-day range picked in the calendar shows as a synthetic,
+  // non-reusable option so the control never lies about what's filtered.
+  _syncDateControls() {
+    const sel = this._day;
+    const isRange = this._start && this._end && this._start !== this._end;
+    sel.innerHTML = "";
+    const opt = (label, value) => {
+      const o = document.createElement("option");
+      o.textContent = label;
+      o.value = value;
+      sel.appendChild(o);
     };
-    this._days.appendChild(mk("All", ""));
-    for (const d of days) this._days.appendChild(mk(this._dayLabel(d), d));
+    opt("All days", "");
+    if (isRange) opt(this._rangeLabel(this._start, this._end), "__range__");
+    for (const d of this._dayList) opt(this._dayLabel(d), d);
+    sel.value = isRange ? "__range__" : (this._start || "");
+    // light up the calendar button whenever any date filter is active
+    this._calbtn.classList.toggle("on", !!(this._start || this._end));
+    if (this._calOpen) this._renderCalendar();
+  }
+
+  _onDaySelect() {
+    const v = this._day.value;
+    if (v === "__range__") return;  // synthetic label for an active range; no-op
+    this._start = this._end = v || "";
+    this._syncDateControls();
+    this._reset();
   }
 
   _dayLabel(d) {
@@ -168,15 +217,113 @@ class NvrBrowserPanel extends HTMLElement {
     return `${mon} ${day}`;
   }
 
-  _onRangeInput() {
-    this._start = this._from.value || "";
-    this._end = this._to.value || "";
-    // keep From <= To
-    if (this._start && this._end && this._start > this._end) {
-      this._end = this._start;
-      this._to.value = this._end;
+  _rangeLabel(s, e) {
+    return `${this._dayLabel(s)} – ${this._dayLabel(e)}`;
+  }
+
+  _toggleCalendar() {
+    if (this._calOpen) this._closeCalendar();
+    else this._openCalendar();
+  }
+
+  _openCalendar() {
+    // open on the month of the current selection, else the newest available day
+    const ref = this._end || this._start || this._maxDay;
+    if (ref) {
+      this._viewMonth = { y: +ref.slice(0, 4), m: +ref.slice(5, 7) - 1 };
+    } else {
+      const now = new Date();
+      this._viewMonth = { y: now.getFullYear(), m: now.getMonth() };
     }
-    if (this._dayList) this._renderDays(this._dayList);
+    this._pickStart = "";
+    this._calOpen = true;
+    this._cal.hidden = false;
+    this._renderCalendar();
+  }
+
+  _closeCalendar() {
+    this._calOpen = false;
+    this._pickStart = "";   // discard a half-finished range pick
+    this._cal.hidden = true;
+  }
+
+  _renderCalendar() {
+    const MON = ["January","February","March","April","May","June",
+                 "July","August","September","October","November","December"];
+    const { y, m } = this._viewMonth;
+    const pad = (n) => String(n).padStart(2, "0");
+    const firstWeekday = new Date(y, m, 1).getDay();   // 0=Sun .. local DOW
+    const daysInMonth = new Date(y, m + 1, 0).getDate();
+    const anchor = this._pickStart;   // start day highlighted between the two clicks
+
+    let html = `
+      <div class="calhd">
+        <button class="navbtn" data-nav="-1" title="Previous month">‹</button>
+        <span class="calmon">${MON[m]} ${y}</span>
+        <button class="navbtn" data-nav="1" title="Next month">›</button>
+      </div>
+      <div class="calgrid calwk">
+        ${["S","M","T","W","T","F","S"].map((d) => `<span class="wd">${d}</span>`).join("")}
+      </div>
+      <div class="calgrid caldays">`;
+    for (let i = 0; i < firstWeekday; i++) html += `<span class="day empty"></span>`;
+    for (let d = 1; d <= daysInMonth; d++) {
+      const iso = `${y}-${pad(m + 1)}-${pad(d)}`;
+      const inBounds = (!this._minDay || iso >= this._minDay) &&
+                       (!this._maxDay || iso <= this._maxDay);
+      let cls = "day";
+      if (!inBounds) cls += " disabled";
+      if (this._daySet.has(iso)) cls += " has";   // a dot marks days with clips
+      if (anchor) {
+        if (iso === anchor) cls += " sel";
+      } else if (iso === this._start || iso === this._end) {
+        cls += " sel";
+      } else if (this._start && this._end && iso > this._start && iso < this._end) {
+        cls += " inrange";
+      }
+      html += `<button class="${cls}" data-day="${iso}"${inBounds ? "" : " disabled"}>${d}</button>`;
+    }
+    html += `</div>
+      <div class="calft">
+        <button class="navbtn" data-clear="1">All days</button>
+        <span class="calhint">${anchor ? "Pick the end day" : "Pick start, then end"}</span>
+      </div>`;
+    this._cal.innerHTML = html;
+
+    this._cal.querySelectorAll("[data-nav]").forEach((b) =>
+      b.addEventListener("click", () => this._navMonth(+b.dataset.nav)));
+    this._cal.querySelector("[data-clear]").addEventListener("click", () => {
+      this._start = this._end = "";
+      this._closeCalendar();
+      this._syncDateControls();
+      this._reset();
+    });
+    this._cal.querySelectorAll(".day[data-day]:not(.disabled)").forEach((b) =>
+      b.addEventListener("click", () => this._pickDay(b.dataset.day)));
+  }
+
+  _navMonth(delta) {
+    let { y, m } = this._viewMonth;
+    m += delta;
+    if (m < 0) { m = 11; y -= 1; }
+    else if (m > 11) { m = 0; y += 1; }
+    this._viewMonth = { y, m };
+    this._renderCalendar();
+  }
+
+  _pickDay(iso) {
+    if (!this._pickStart) {
+      // first click anchors the start; re-render to highlight it, await the end
+      this._pickStart = iso;
+      this._renderCalendar();
+      return;
+    }
+    let s = this._pickStart, e = iso;
+    if (e < s) { const t = s; s = e; e = t; }   // clicked before the anchor → swap
+    this._start = s;
+    this._end = e;
+    this._closeCalendar();
+    this._syncDateControls();
     this._reset();
   }
 
@@ -269,9 +416,12 @@ class NvrBrowserPanel extends HTMLElement {
   _openLightbox(ev) {
     this._lbv.src = ev.url;
     const objs = (ev.objects || []).join(", ");
+    // the clip URL is now /api/.../clip?path=…&authSig=… (no .mp4 suffix), so set
+    // an explicit download name to keep a sensible filename + extension
+    const fname = `${ev.date}_${(ev.time || "").replace(/:/g, "-")}_${ev.camera}.mp4`;
     this._lbi.innerHTML =
       `<span>${ev.camera} &middot; ${ev.datetime}${objs ? " &middot; " + objs : ""}</span>` +
-      `<a href="${ev.url}" download>Download</a>`;
+      `<a href="${ev.url}" download="${fname}">Download</a>`;
     this._lb.classList.add("show");
     this._lbv.play().catch(() => {});
   }
