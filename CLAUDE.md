@@ -12,7 +12,7 @@ thumbnails, click-to-play lightbox) that replaces HA's clunky Media browser for
 the `/config/nvr` motion clips. It must **never** modify the recording automations
 or any file under `/config/nvr`.
 
-Current dev version: **0.6.0**. The released (HACS) version may lag this working
+Current dev version: **0.6.1**. The released (HACS) version may lag this working
 tree — bump `VERSION` when cutting a release (see Releasing).
 
 ## Layout

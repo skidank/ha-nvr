@@ -11,8 +11,8 @@ any file under `/config/nvr`. Thumbnails are cached to a separate dir
 ## What it does
 
 - **Flat newest-first feed** of every clip across all cameras, infinite-scroll.
-- **Filter chips** by camera and by detected object (person, cat, …), both
-  derived from the existing folder layout (one chip per camera/object folder).
+- **Filter dropdowns** for camera and detected object (person, cat, …), both
+  derived from the existing folder layout (one entry per camera/object folder).
 - **Thumbnails** generated on demand by Home Assistant's bundled `ffmpeg`
   (seeks ~10s in, scaled to 320px), cached to disk, throttled to 3 concurrent grabs.
 - **Click to play** inline in a lightbox, with a download link.
