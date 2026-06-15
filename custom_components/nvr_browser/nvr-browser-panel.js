@@ -26,6 +26,24 @@ class NvrBrowserPanel extends HTMLElement {
     this._cameras = new Set();
     this._objects = new Set();
     this._booted = false;
+    this._basePath = "";   // page path the panel mounted at; guards URL re-syncs
+    this._onLocationChanged = () => this._syncFromUrl();
+  }
+
+  // The element may be torn down and rebuilt, OR kept and re-attached, when the
+  // user navigates away and back — HA's choice, and not one we want to depend on.
+  // Listening for navigations (HA's `location-changed` + browser back/forward)
+  // and re-attachment makes deep links apply either way: a fresh element reads
+  // params in _boot(); a reused one picks them up here.
+  connectedCallback() {
+    window.addEventListener("location-changed", this._onLocationChanged);
+    window.addEventListener("popstate", this._onLocationChanged);
+    if (this._booted) this._syncFromUrl();   // re-attached cached instance
+  }
+
+  disconnectedCallback() {
+    window.removeEventListener("location-changed", this._onLocationChanged);
+    window.removeEventListener("popstate", this._onLocationChanged);
   }
 
   set hass(hass) {
@@ -36,7 +54,79 @@ class NvrBrowserPanel extends HTMLElement {
     }
   }
 
+  // Filters that round-trip through the page URL: param name <-> state field,
+  // with an optional validator. This is the single source of truth for which
+  // filters are deep-linkable/shareable — add a row to expose a new one. Param
+  // names intentionally match the events API (camera/object/start/end).
+  _filterParams() {
+    const isDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v);
+    return [
+      { param: "camera", field: "_camera" },
+      { param: "object", field: "_object" },
+      { param: "start", field: "_start", valid: isDate },
+      { param: "end", field: "_end", valid: isDate },
+    ];
+  }
+
+  // Read filter state from the page URL so the panel can be deep-linked, e.g.
+  // /nvr-browser?camera=front_door&object=person&start=2026-06-01&end=2026-06-08.
+  // Called once on boot, before the first fetch, so the initial load is filtered.
+  _applyUrlParams() {
+    const P = new URLSearchParams(window.location.search);
+    for (const { param, field, valid } of this._filterParams()) {
+      const v = P.get(param);
+      if (v && (!valid || valid(v))) this[field] = v;
+    }
+    // Pre-seed the facet sets so a deep-linked value shows in its dropdown even
+    // if no matching event reveals that facet (e.g. the filter matches nothing).
+    if (this._camera) this._cameras.add(this._camera);
+    if (this._object) this._objects.add(this._object);
+  }
+
+  // Reflect the active filters back into the page URL (without navigating), so
+  // the current view is shareable/bookmarkable. replaceState keeps each filter
+  // change out of the back-history; we preserve HA's router state object.
+  _syncUrl() {
+    const P = new URLSearchParams();
+    for (const { param, field } of this._filterParams()) {
+      if (this[field]) P.set(param, this[field]);
+    }
+    const qs = P.toString();
+    const url = window.location.pathname + (qs ? `?${qs}` : "");
+    try {
+      window.history.replaceState(window.history.state, "", url);
+    } catch (e) {
+      /* non-fatal: URL just won't update; the filters still apply */
+    }
+  }
+
+  // Re-read filters from the URL and, if they changed, apply them and reload.
+  // Fires on in-app navigation, browser back/forward, and re-attachment. Guarded
+  // so navigating to a *different* panel (URL no longer ours) is ignored, and a
+  // no-op when nothing changed — which also breaks the replaceState feedback loop
+  // (_reset -> _syncUrl writes the same URL without firing a navigation event).
+  _syncFromUrl() {
+    if (!this._booted) return;
+    if (window.location.pathname !== this._basePath) return;
+    const P = new URLSearchParams(window.location.search);
+    let changed = false;
+    for (const { param, field, valid } of this._filterParams()) {
+      let v = P.get(param) || "";
+      if (v && valid && !valid(v)) v = "";   // drop a malformed value
+      if (this[field] !== v) { this[field] = v; changed = true; }
+    }
+    if (!changed) return;
+    if (this._camera) this._cameras.add(this._camera);
+    if (this._object) this._objects.add(this._object);
+    this._renderSelect(this._cams, [...this._cameras].sort(), "_camera", "All cameras");
+    this._renderSelect(this._objs, [...this._objects].sort(), "_object", "All objects");
+    this._syncDateControls();
+    this._reset();
+  }
+
   _boot() {
+    this._applyUrlParams();
+    this._basePath = window.location.pathname;
     this.shadowRoot.innerHTML = `
       <style>
         :host { display: block; height: 100%; background: var(--primary-background-color, #111); color: var(--primary-text-color, #e1e1e1); }
@@ -141,9 +231,10 @@ class NvrBrowserPanel extends HTMLElement {
     this._day.addEventListener("change", () => this._onDaySelect());
     this._cams.addEventListener("change", () => { this._camera = this._cams.value; this._reset(); });
     this._objs.addEventListener("change", () => { this._object = this._objs.value; this._reset(); });
-    // seed both with just their "All" option until events reveal the facets
-    this._renderSelect(this._cams, [], "_camera", "All cameras");
-    this._renderSelect(this._objs, [], "_object", "All objects");
+    // Seed with the "All" option plus any facet already known from a deep-linked
+    // filter (_applyUrlParams pre-seeds the sets); the rest fill in as events arrive.
+    this._renderSelect(this._cams, [...this._cameras].sort(), "_camera", "All cameras");
+    this._renderSelect(this._objs, [...this._objects].sort(), "_object", "All objects");
     this._calbtn.addEventListener("click", () => this._toggleCalendar());
     // click anywhere outside the popup (or its button) closes it
     document.addEventListener("click", (e) => {
@@ -331,6 +422,7 @@ class NvrBrowserPanel extends HTMLElement {
   }
 
   _reset() {
+    this._syncUrl();
     this._events = [];
     this._seen.clear();
     this._offset = 0;

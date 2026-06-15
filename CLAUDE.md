@@ -12,7 +12,7 @@ thumbnails, click-to-play lightbox) that replaces HA's clunky Media browser for
 the `/config/nvr` motion clips. It must **never** modify the recording automations
 or any file under `/config/nvr`.
 
-Current dev version: **0.6.1**. The released (HACS) version may lag this working
+Current dev version: **0.6.2**. The released (HACS) version may lag this working
 tree — bump `VERSION` when cutting a release (see Releasing).
 
 ## Layout
@@ -58,6 +58,28 @@ nvr_browser/
   default 24h): deletes cached thumbs whose source clip has rotated out (keep-set
   from `_valid_thumb_names`), and stale `.part.jpg` temps older than
   `_PART_STALE_SECONDS` (1h) without racing a live grab.
+- **Deep-linking / shareable URLs** (frontend, `_filterParams`/`_applyUrlParams`/
+  `_syncUrl`/`_syncFromUrl`): the panel reads its filters from
+  `window.location.search` (`?camera=&object=&start=&end=`, param names matching
+  the events API) so it can be opened pre-filtered from anywhere (e.g. a
+  live-camera card's `navigate` tap_action), and mirrors the active filters back
+  into the URL via `history.replaceState` on every filter change so the address
+  bar is always a shareable link. `_filterParams()` is the single source of truth
+  for which filters round-trip — add a row there (param↔state-field, optional
+  validator) to expose a new one; nothing else needs to change. A deep-linked
+  camera/object is pre-seeded into its facet set so the dropdown shows it even
+  when the filter matches zero clips.
+  - **Why it reacts to navigation, not just boot:** HA may either tear down and
+    rebuild the panel element or keep and re-attach it when you leave and return —
+    its choice, not guaranteed. So besides reading params in `_boot()`,
+    `connectedCallback` registers `location-changed` (HA's in-app `navigate`) +
+    `popstate` (back/forward) listeners and `_syncFromUrl()` re-applies any change;
+    a re-attached cached instance also re-syncs on `connectedCallback`. This makes
+    deep links land regardless of HA's panel-lifecycle caching. `_syncFromUrl` is
+    a no-op unless params actually changed (so `_reset`→`_syncUrl`'s `replaceState`
+    can't loop) and bails when `location.pathname` no longer matches the mount
+    path (so navigating to another panel is ignored). Listeners are removed in
+    `disconnectedCallback`.
 - **Playback** uses the authed `/api/nvr_browser/clip` endpoint (signed URLs) —
   the `<video src>` and Download link just use the signed `ev.url`. The frontend
   never imports HA frontend internals; it only uses `hass.callApi` + plain
