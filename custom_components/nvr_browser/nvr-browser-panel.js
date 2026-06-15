@@ -45,10 +45,6 @@ class NvrBrowserPanel extends HTMLElement {
                color: var(--app-header-text-color, #fff); box-shadow: 0 2px 6px rgba(0,0,0,.4); }
         .bar .title { font-size: 18px; font-weight: 600; margin-right: 6px; }
         .bar .spacer { flex: 1; }
-        .chips { display: flex; flex-wrap: wrap; gap: 6px; }
-        .chip { cursor: pointer; border: 1px solid rgba(255,255,255,.35); border-radius: 14px; padding: 3px 11px;
-                font-size: 13px; background: transparent; color: inherit; line-height: 1.5; }
-        .chip.on { background: #fff; color: #000; border-color: #fff; }
         .label { opacity: .7; font-size: 12px; text-transform: uppercase; letter-spacing: .5px; margin: 0 2px 0 6px; }
         .sel { background: rgba(255,255,255,.12); color: inherit; border: 1px solid rgba(255,255,255,.35);
                border-radius: 6px; padding: 3px 6px; font-size: 13px; color-scheme: dark; }
@@ -115,8 +111,10 @@ class NvrBrowserPanel extends HTMLElement {
           <button class="iconbtn" id="calbtn" title="Pick a date range" aria-haspopup="true">📅</button>
           <div class="cal" id="cal" hidden></div>
         </div>
-        <span class="label">Camera</span><div class="chips" id="cams"></div>
-        <span class="label">Object</span><div class="chips" id="objs"></div>
+        <span class="label">Camera</span>
+        <select class="sel" id="cams" title="Filter by camera"></select>
+        <span class="label">Object</span>
+        <select class="sel" id="objs" title="Filter by object"></select>
         <span class="spacer"></span>
         <button class="btn" id="refresh">Refresh</button>
       </div>
@@ -141,6 +139,11 @@ class NvrBrowserPanel extends HTMLElement {
     this._lbi = this.shadowRoot.getElementById("lbi");
 
     this._day.addEventListener("change", () => this._onDaySelect());
+    this._cams.addEventListener("change", () => { this._camera = this._cams.value; this._reset(); });
+    this._objs.addEventListener("change", () => { this._object = this._objs.value; this._reset(); });
+    // seed both with just their "All" option until events reveal the facets
+    this._renderSelect(this._cams, [], "_camera", "All cameras");
+    this._renderSelect(this._objs, [], "_object", "All objects");
     this._calbtn.addEventListener("click", () => this._toggleCalendar());
     // click anywhere outside the popup (or its button) closes it
     document.addEventListener("click", (e) => {
@@ -370,30 +373,28 @@ class NvrBrowserPanel extends HTMLElement {
   _addFacets(ev) {
     if (ev.camera && !this._cameras.has(ev.camera)) {
       this._cameras.add(ev.camera);
-      this._renderChips(this._cams, [...this._cameras].sort(), "_camera");
+      this._renderSelect(this._cams, [...this._cameras].sort(), "_camera", "All cameras");
     }
     let added = false;
     for (const o of ev.objects || []) {
       if (!this._objects.has(o)) { this._objects.add(o); added = true; }
     }
-    if (added) this._renderChips(this._objs, [...this._objects].sort(), "_object");
+    if (added) this._renderSelect(this._objs, [...this._objects].sort(), "_object", "All objects");
   }
 
-  _renderChips(container, values, field) {
-    container.innerHTML = "";
-    const mk = (label, value) => {
-      const c = document.createElement("button");
-      c.className = "chip" + (this[field] === value ? " on" : "");
-      c.textContent = label;
-      c.addEventListener("click", () => {
-        this[field] = this[field] === value ? "" : value;
-        this._renderChips(container, values, field);
-        this._reset();
-      });
-      return c;
+  // Rebuild a filter <select> from the discovered facet values, keeping the
+  // current selection. The "All" option (value "") clears the filter.
+  _renderSelect(sel, values, field, allLabel) {
+    sel.innerHTML = "";
+    const opt = (label, value) => {
+      const o = document.createElement("option");
+      o.textContent = label;
+      o.value = value;
+      sel.appendChild(o);
     };
-    container.appendChild(mk("All", ""));
-    for (const v of values) container.appendChild(mk(v, v));
+    opt(allLabel, "");
+    for (const v of values) opt(v, v);
+    sel.value = this[field] || "";
   }
 
   _card(ev) {
