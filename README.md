@@ -13,6 +13,9 @@ any file under `/config/nvr`. Thumbnails are cached to a separate dir
 - **Flat newest-first feed** of every clip across all cameras, infinite-scroll.
 - **Filter dropdowns** for camera and detected object (person, cat, …), both
   derived from the existing folder layout (one entry per camera/object folder).
+- **Date controls** — a Day dropdown for jumping to a single day, plus a
+  range-picker calendar popup that dots the days with clips and filters to an
+  inclusive date range.
 - **Thumbnails** generated on demand by Home Assistant's bundled `ffmpeg`
   (seeks ~10s in, scaled to 320px), cached to disk, throttled to 3 concurrent grabs.
 - **Click to play** inline in a lightbox, with a download link.
@@ -36,6 +39,8 @@ not exposed by HA's unauthenticated `/local/` route).
 
 - `GET /api/nvr_browser/events?offset=&limit=&camera=&object=&start=&end=` — authed
   JSON list (`start`/`end` are inclusive `YYYY-MM-DD` bounds).
+- `GET /api/nvr_browser/days` — authed JSON `{days: [...]}`, the available
+  `YYYY-MM-DD` folders newest-first; powers the Day dropdown and the calendar.
 - `GET /api/nvr_browser/thumb?path=<rel>` — JPEG thumbnail (authed; the events
   view hands the frontend short-lived signed URLs so a plain `<img src>` still
   works only for the logged-in user; path is sanitised against traversal).
@@ -60,7 +65,9 @@ not exposed by HA's unauthenticated `/local/` route).
 1. In HACS, open the ⋮ menu → **Custom repositories**.
 2. Add this repository's URL with category **Integration**, then download
    **NVR Browser**.
-3. Restart Home Assistant.
+3. Add `nvr_browser:` to `configuration.yaml` (see [Configuration](#configuration)) —
+   the integration won't load until you do.
+4. Restart Home Assistant.
 
 ### Manual
 

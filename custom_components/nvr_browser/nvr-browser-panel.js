@@ -27,23 +27,44 @@ class NvrBrowserPanel extends HTMLElement {
     this._objects = new Set();
     this._booted = false;
     this._basePath = "";   // page path the panel mounted at; guards URL re-syncs
+    // Stable handler refs so they can be removed in disconnectedCallback. These
+    // live on `document`/`window`, which outlive the element, so leaving them
+    // attached would leak every torn-down panel instance (and fire its handlers
+    // app-wide). They read state lazily, so they're safe before _boot() runs.
     this._onLocationChanged = () => this._syncFromUrl();
+    this._onDocClick = (e) => {
+      if (!this._calOpen) return;   // closes the calendar popup on an outside click
+      const path = e.composedPath();
+      if (!path.includes(this._cal) && !path.includes(this._calbtn)) this._closeCalendar();
+    };
+    this._onKeydown = (e) => { if (e.key === "Escape") this._closeLightbox(); };
   }
 
   // The element may be torn down and rebuilt, OR kept and re-attached, when the
   // user navigates away and back — HA's choice, and not one we want to depend on.
   // Listening for navigations (HA's `location-changed` + browser back/forward)
   // and re-attachment makes deep links apply either way: a fresh element reads
-  // params in _boot(); a reused one picks them up here.
+  // params in _boot(); a reused one picks them up here. The document-level popup
+  // handlers are (re)bound here too so a re-attached cached instance keeps them
+  // (re-adding the same ref is a no-op, so this can't double-register).
   connectedCallback() {
     window.addEventListener("location-changed", this._onLocationChanged);
     window.addEventListener("popstate", this._onLocationChanged);
-    if (this._booted) this._syncFromUrl();   // re-attached cached instance
+    document.addEventListener("click", this._onDocClick);
+    document.addEventListener("keydown", this._onKeydown);
+    if (this._booted) {
+      this._syncFromUrl();   // re-attached cached instance
+      // The observer was disconnected on detach; re-arm infinite scroll.
+      if (this._observer) this._observer.observe(this.shadowRoot.getElementById("sentinel"));
+    }
   }
 
   disconnectedCallback() {
     window.removeEventListener("location-changed", this._onLocationChanged);
     window.removeEventListener("popstate", this._onLocationChanged);
+    document.removeEventListener("click", this._onDocClick);
+    document.removeEventListener("keydown", this._onKeydown);
+    if (this._observer) this._observer.disconnect();
   }
 
   set hass(hass) {
@@ -236,16 +257,11 @@ class NvrBrowserPanel extends HTMLElement {
     this._renderSelect(this._cams, [...this._cameras].sort(), "_camera", "All cameras");
     this._renderSelect(this._objs, [...this._objects].sort(), "_object", "All objects");
     this._calbtn.addEventListener("click", () => this._toggleCalendar());
-    // click anywhere outside the popup (or its button) closes it
-    document.addEventListener("click", (e) => {
-      if (!this._calOpen) return;
-      const path = e.composedPath();
-      if (!path.includes(this._cal) && !path.includes(this._calbtn)) this._closeCalendar();
-    });
+    // Outside-click (close calendar) and Escape (close lightbox) live on
+    // `document`, so they're registered/removed in connected/disconnectedCallback.
     this.shadowRoot.getElementById("refresh").addEventListener("click", () => this._reset());
     this.shadowRoot.getElementById("lbx").addEventListener("click", () => this._closeLightbox());
     this._lb.addEventListener("click", (e) => { if (e.target === this._lb) this._closeLightbox(); });
-    document.addEventListener("keydown", (e) => { if (e.key === "Escape") this._closeLightbox(); });
 
     this._observer = new IntersectionObserver(
       (entries) => { if (entries.some((e) => e.isIntersecting)) this._loadMore(); },
@@ -431,6 +447,14 @@ class NvrBrowserPanel extends HTMLElement {
     this._loadMore();
   }
 
+  // Is the load-more sentinel within the IntersectionObserver's 600px margin of
+  // the viewport? Used to keep filling when the observer won't re-fire (see below).
+  _sentinelInView() {
+    const s = this.shadowRoot && this.shadowRoot.getElementById("sentinel");
+    if (!s) return false;
+    return s.getBoundingClientRect().top <= (window.innerHeight || 0) + 600;
+  }
+
   async _loadMore() {
     if (this._loading || this._done) return;
     this._loading = true;
@@ -440,6 +464,7 @@ class NvrBrowserPanel extends HTMLElement {
     if (this._object) params.set("object", this._object);
     if (this._start) params.set("start", this._start);
     if (this._end) params.set("end", this._end);
+    let ok = false;
     try {
       const data = await this._hass.callApi("GET", `nvr_browser/events?${params}`);
       const events = (data && data.events) || [];
@@ -455,11 +480,18 @@ class NvrBrowserPanel extends HTMLElement {
       this._status.textContent = this._done
         ? (this._events.length ? `${this._events.length} clips` : "No clips match.")
         : "";
+      ok = true;
     } catch (err) {
       this._status.textContent = `Error: ${err && err.message ? err.message : err}`;
     } finally {
       this._loading = false;
     }
+    // The IntersectionObserver only fires on intersection *transitions*. If a
+    // page renders but the sentinel never leaves the viewport (few results, or a
+    // tall/wide screen where 60 cards don't fill it), no further event fires and
+    // scrolling stalls. So after a successful load, keep going while the sentinel
+    // is still in view. Guarded on `ok` so a failing endpoint isn't hammered.
+    if (ok && !this._done && this._sentinelInView()) this._loadMore();
   }
 
   _addFacets(ev) {
@@ -489,37 +521,54 @@ class NvrBrowserPanel extends HTMLElement {
     sel.value = this[field] || "";
   }
 
+  // Escape a value for safe interpolation into innerHTML. camera/object/date/time
+  // all originate from folder & file names on disk, so they're untrusted HTML —
+  // a name containing <, >, &, " or ' must not break out of its element/attribute.
+  _esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
   _card(ev) {
     const card = document.createElement("div");
     card.className = "card";
     const badges = (ev.objects || [])
-      .map((o) => `<span class="badge ${o}">${o}</span>`)
+      .map((o) => {
+        // The object name doubles as a CSS class (.badge.person etc.); only emit
+        // it as a class when it's a safe token, but always escape the visible text.
+        const cls = /^[A-Za-z0-9_-]+$/.test(o) ? ` ${o}` : "";
+        return `<span class="badge${cls}">${this._esc(o)}</span>`;
+      })
       .join("");
     card.innerHTML = `
       ${badges ? `<div class="badges">${badges}</div>` : ""}
-      <img class="thumb" loading="lazy" src="${ev.thumb}" alt="">
+      <img class="thumb" loading="lazy" src="${this._esc(ev.thumb)}" alt="">
       <div class="meta">
-        <span class="when">${ev.time} &middot; ${ev.date}</span>
-        <span class="cam">${ev.camera}</span>
+        <span class="when">${this._esc(ev.time)} &middot; ${this._esc(ev.date)}</span>
+        <span class="cam">${this._esc(ev.camera)}</span>
       </div>`;
     card.addEventListener("click", () => this._openLightbox(ev));
     return card;
   }
 
   _openLightbox(ev) {
-    this._lbv.src = ev.url;
+    this._lbv.src = ev.url;   // set via property — no HTML parsing, so safe as-is
     const objs = (ev.objects || []).join(", ");
     // the clip URL is now /api/.../clip?path=…&authSig=… (no .mp4 suffix), so set
     // an explicit download name to keep a sensible filename + extension
     const fname = `${ev.date}_${(ev.time || "").replace(/:/g, "-")}_${ev.camera}.mp4`;
+    // Escape everything interpolated into innerHTML — camera/datetime/objects are
+    // filesystem-derived (see _esc), and the URL goes into an href attribute.
     this._lbi.innerHTML =
-      `<span>${ev.camera} &middot; ${ev.datetime}${objs ? " &middot; " + objs : ""}</span>` +
-      `<a href="${ev.url}" download="${fname}">Download</a>`;
+      `<span>${this._esc(ev.camera)} &middot; ${this._esc(ev.datetime)}` +
+      `${objs ? " &middot; " + this._esc(objs) : ""}</span>` +
+      `<a href="${this._esc(ev.url)}" download="${this._esc(fname)}">Download</a>`;
     this._lb.classList.add("show");
     this._lbv.play().catch(() => {});
   }
 
   _closeLightbox() {
+    if (!this._lb) return;   // Escape can fire before _boot() builds the lightbox
     this._lb.classList.remove("show");
     this._lbv.pause();
     this._lbv.removeAttribute("src");

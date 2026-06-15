@@ -48,7 +48,7 @@ PANEL_URL_PATH = "nvr-browser"
 PANEL_TITLE = "NVR"
 PANEL_ICON = "mdi:cctv"
 WEBCOMPONENT_NAME = "nvr-browser-panel"
-VERSION = "0.6.2"
+VERSION = "0.6.3"
 
 # Folder/file shapes produced by the recording automations:
 #   <date>/<hour>/<camera>/HH:MM:SS.mp4           -> the canonical clip
@@ -210,8 +210,13 @@ async def _generate_thumb(src: str, dst: str) -> bool:
     )
     # The temp file MUST keep a .jpg suffix: ffmpeg infers the output format from
     # the extension, and a bare ".tmp" makes it fail format detection. We also
-    # pass "-f image2" so the format is never left to guesswork.
-    tmp = f"{dst}.{os.getpid()}.part.jpg"
+    # pass "-f image2" so the format is never left to guesswork. The name MUST be
+    # unique per grab: HA is single-process, so two concurrent requests for the
+    # same uncached clip would otherwise share one temp path — both ffmpegs write
+    # it at once (corrupt JPEG) and the second os.replace races the first. A
+    # random token makes each attempt's temp file its own; os.replace is atomic,
+    # so concurrent grabs of the same clip just both produce a valid thumb.
+    tmp = f"{dst}.{os.getpid()}.{os.urandom(4).hex()}.part.jpg"
     last_err = b""
     async with _THUMB_SEM:
         for seek in ("00:00:10", "00:00:03", "00:00:00"):
@@ -249,7 +254,13 @@ def _valid_thumb_names() -> set[str]:
         except OSError:
             continue
         for hour in hours:
-            for folder in os.listdir(os.path.join(ddir, hour)):
+            try:
+                folders = os.listdir(os.path.join(ddir, hour))
+            except OSError:
+                # The hour folder may rotate out mid-sweep — exactly the race the
+                # pruner must tolerate. Skip it rather than abort the whole prune.
+                continue
+            for folder in folders:
                 fdir = os.path.join(ddir, hour, folder)
                 if not os.path.isdir(fdir):
                     continue
