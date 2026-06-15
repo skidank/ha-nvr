@@ -1,11 +1,11 @@
 {
   "domain": "nvr_browser",
   "name": "NVR Browser",
-  "version": "0.3.0",
-  "documentation": "https://github.com/mike/nvr_browser",
-  "issue_tracker": "https://github.com/mike/nvr_browser/issues",
+  "version": "0.6.0",
+  "documentation": "https://github.com/skidank/ha-nvr",
+  "issue_tracker": "https://github.com/skidank/ha-nvr/issues",
   "dependencies": ["http", "frontend"],
-  "codeowners": [],
+  "codeowners": ["@skidank"],
   "iot_class": "local_polling",
   "config_flow": false
 }

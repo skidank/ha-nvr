@@ -1,14 +1,16 @@
-"""NVR Browser — a purpose-built gallery for the home-grown www/nvr clips.
+"""NVR Browser — a purpose-built gallery for the home-grown NVR clips in /config/nvr.
 
 This integration is intentionally read-only and additive. It does not touch the
-recording automations or any file under www/nvr. It exposes:
+recording automations or any file under /config/nvr. It exposes:
 
   * GET /api/nvr_browser/events  (authed) — newest-first event list, paginated
-  * GET /api/nvr_browser/thumb   (no auth) — ffmpeg frame-grab, cached to disk
+  * GET /api/nvr_browser/thumb   (authed) — ffmpeg frame-grab, cached to disk
+  * GET /api/nvr_browser/clip    (authed) — original clip stream (range-capable)
   * a custom sidebar panel ("NVR") rendering the gallery
 
-Clips themselves are played straight from HA's existing /local/nvr/... static
-route (the files already live under www/), so no extra video serving is needed.
+Clips live under /config/nvr — OUTSIDE www/, so they are not exposed by HA's
+unauthenticated /local/ route. They're streamed via the authed clip view, whose
+URLs the events list signs so a plain <video src> still works for the user.
 """
 from __future__ import annotations
 
@@ -35,8 +37,10 @@ _LOGGER = logging.getLogger(__name__)
 
 DOMAIN = "nvr_browser"
 
-# Paths are container-internal (HA runs with -v <root>:/config).
-NVR_DIR = "/config/www/nvr"
+# Paths are under HA's config dir. Clips live OUTSIDE www/ so they are NOT served
+# by HA's unauthenticated /local/ route; they're streamed via the authed
+# /api/nvr_browser/clip endpoint instead.
+NVR_DIR = "/config/nvr"
 THUMB_DIR = "/config/nvr_thumbs"
 
 STATIC_JS_URL = "/nvr_browser_static/nvr-browser-panel.js"
@@ -44,7 +48,7 @@ PANEL_URL_PATH = "nvr-browser"
 PANEL_TITLE = "NVR"
 PANEL_ICON = "mdi:cctv"
 WEBCOMPONENT_NAME = "nvr-browser-panel"
-VERSION = "0.3.0"
+VERSION = "0.6.0"
 
 # Folder/file shapes produced by the recording automations:
 #   <date>/<hour>/<camera>/HH:MM:SS.mp4           -> the canonical clip
@@ -62,6 +66,13 @@ PRUNE_INTERVAL = timedelta(hours=24)
 # Don't delete an in-progress ".part.jpg" younger than this (avoids racing a
 # concurrent frame-grab); older ones are leftovers from a crashed run.
 _PART_STALE_SECONDS = 3600
+
+# The thumb and clip views are authed, but a plain <img>/<video> can't send a
+# bearer token. So the (authenticated) event list hands the frontend short-lived
+# *signed* URLs (HA's async_sign_path): each is time-limited and bound to the
+# caller's refresh token, so media loads only for the logged-in user who fetched
+# the list.
+_SIGNED_URL_TTL = timedelta(hours=12)
 
 
 def _thumb_name(rel: str) -> str:
@@ -176,7 +187,7 @@ def _scan(
                         "datetime": f"{date} {ev['time']}",
                         "camera": ev["camera"],
                         "objects": sorted(ev["objects"]),
-                        "url": f"/local/nvr/{quote(rel)}",
+                        "url": f"/api/nvr_browser/clip?path={quote(rel)}",
                         "thumb": f"/api/nvr_browser/thumb?path={quote(rel)}",
                     }
                 )
@@ -307,9 +318,36 @@ class NvrEventsView(HomeAssistantView):
         events = await self.hass.async_add_executor_job(
             _scan, offset, limit, camera, obj, start, end
         )
+        self._sign_urls(events)
         return self.json(
             {"events": events, "offset": offset, "limit": limit, "count": len(events)}
         )
+
+    def _sign_urls(self, events: list[dict]) -> None:
+        """Replace each event's thumb + clip path with a short-lived signed URL.
+
+        The thumb and clip views require auth, but a plain <img>/<video> can't
+        carry a bearer token. HA's signed-path mechanism bridges that: this
+        (authenticated) request mints a time-limited, refresh-token-bound URL per
+        asset, so media loads for this user without exposing an unauthed endpoint.
+        """
+        signer = getattr(self.hass.http, "async_sign_path", None)
+        if signer is None:
+            try:
+                from homeassistant.components.http.auth import async_sign_path
+            except ImportError:
+                _LOGGER.warning(
+                    "nvr_browser: async_sign_path unavailable; media won't load"
+                )
+                return
+            signer = lambda path, exp: async_sign_path(self.hass, path, exp)  # noqa: E731
+        for ev in events:
+            try:
+                ev["thumb"] = signer(ev["thumb"], _SIGNED_URL_TTL)
+                ev["url"] = signer(ev["url"], _SIGNED_URL_TTL)
+            except Exception as err:  # noqa: BLE001 — never let signing 500 the list
+                _LOGGER.warning("nvr_browser: media URL signing failed: %s", err)
+                return
 
 
 class NvrDaysView(HomeAssistantView):
@@ -327,11 +365,12 @@ class NvrDaysView(HomeAssistantView):
 
 
 class NvrThumbView(HomeAssistantView):
-    """Cached JPEG thumbnail; unauthed so it can be used as a plain <img src>."""
+    """Cached JPEG thumbnail. Authed (the default): the event list hands the
+    frontend signed URLs so a plain <img src> still loads only for the
+    logged-in user who fetched the list."""
 
     url = "/api/nvr_browser/thumb"
     name = "api:nvr_browser:thumb"
-    requires_auth = False
 
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
@@ -350,6 +389,28 @@ class NvrThumbView(HomeAssistantView):
         return web.FileResponse(dst, headers={"Cache-Control": "max-age=86400"})
 
 
+class NvrClipView(HomeAssistantView):
+    """Authed clip stream. Clips live outside www/, so HA's public /local/ route
+    no longer serves them — this serves them by absolute path, with auth. aiohttp's
+    FileResponse honours HTTP range requests, so <video> seeking works; the event
+    list hands out signed URLs (see NvrEventsView._sign_urls)."""
+
+    url = "/api/nvr_browser/clip"
+    name = "api:nvr_browser:clip"
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request: web.Request) -> web.StreamResponse:
+        rel = _safe_rel(request.query.get("path", ""))
+        if not rel:
+            return web.Response(status=HTTPStatus.BAD_REQUEST)
+        src = os.path.join(NVR_DIR, rel)
+        if not os.path.isfile(src):
+            return web.Response(status=HTTPStatus.NOT_FOUND)
+        return web.FileResponse(src)
+
+
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register the API views and the custom sidebar panel."""
     js_path = os.path.join(os.path.dirname(__file__), "nvr-browser-panel.js")
@@ -360,6 +421,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     hass.http.register_view(NvrEventsView(hass))
     hass.http.register_view(NvrDaysView(hass))
     hass.http.register_view(NvrThumbView(hass))
+    hass.http.register_view(NvrClipView(hass))
 
     await hass.async_add_executor_job(lambda: os.makedirs(THUMB_DIR, exist_ok=True))
 
