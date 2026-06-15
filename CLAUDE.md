@@ -12,7 +12,7 @@ thumbnails, click-to-play lightbox) that replaces HA's clunky Media browser for
 the `/config/nvr` motion clips. It must **never** modify the recording automations
 or any file under `/config/nvr`.
 
-Current dev version: **0.6.2**. The released (HACS) version may lag this working
+Current dev version: **0.6.3**. The released (HACS) version may lag this working
 tree — bump `VERSION` when cutting a release (see Releasing).
 
 ## Layout
@@ -80,6 +80,23 @@ nvr_browser/
     can't loop) and bails when `location.pathname` no longer matches the mount
     path (so navigating to another panel is ignored). Listeners are removed in
     `disconnectedCallback`.
+- **Rendering safety:** `camera`/`object`/`date`/`time` all come from folder &
+  file names on disk, so they're untrusted when injected into `innerHTML`. Any
+  such value interpolated into markup MUST go through `_esc()` (and the object
+  name, which doubles as a `.badge.<name>` CSS class, is only emitted as a class
+  when it matches `^[A-Za-z0-9_-]+$`). Prefer `textContent`/element properties
+  (as `_renderSelect` and `this._lbv.src` do) over raw `innerHTML` for new code.
+- **Element lifecycle:** document-/window-level listeners (`location-changed`,
+  `popstate`, outside-click, Escape) and the `IntersectionObserver` outlive the
+  element, so they're (re)bound in `connectedCallback` from stable handler refs
+  and torn down in `disconnectedCallback` — otherwise each navigated-away panel
+  leaks and keeps firing app-wide. `_boot()` only builds the shadow DOM/observer
+  once (guarded by `_booted`); the observer is re-`observe`d on re-attach.
+- **Infinite scroll:** the `IntersectionObserver` only fires on intersection
+  *transitions*, so a sentinel that never leaves the viewport (few results, or a
+  tall/wide screen) won't re-trigger. `_loadMore` therefore re-calls itself after
+  a successful page while `_sentinelInView()` is still true (guarded on success
+  so a failing endpoint isn't hammered).
 - **Playback** uses the authed `/api/nvr_browser/clip` endpoint (signed URLs) —
   the `<video src>` and Download link just use the signed `ev.url`. The frontend
   never imports HA frontend internals; it only uses `hass.callApi` + plain
