@@ -125,6 +125,12 @@ Distributed as a HACS-installable custom integration (users can also copy it int
 repo — cut a release by bumping the version and tagging, and HACS serves the
 tagged release to users. User-facing install steps live in README.md.
 
+HACS wiring lives in `hacs.json` (root) + the `version`/`documentation`/
+`issue_tracker`/`codeowners` keys in `manifest.json`. `.github/workflows/validate.yml`
+runs the **HACS** action and **hassfest** on every push/PR, so packaging
+breakage (bad manifest, missing keys) is caught in CI. Keep `manifest.json` keys
+ordered `domain`, `name`, then alphabetical — hassfest enforces it.
+
 - **Python change** (`__init__.py`): users must **restart Home Assistant** to pick
   it up.
 - **Frontend-only change** (`nvr-browser-panel.js`): no restart — the panel's
