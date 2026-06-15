@@ -129,7 +129,9 @@ HACS wiring lives in `hacs.json` (root) + the `version`/`documentation`/
 `issue_tracker`/`codeowners` keys in `manifest.json`. `.github/workflows/validate.yml`
 runs the **HACS** action and **hassfest** on every push/PR, so packaging
 breakage (bad manifest, missing keys) is caught in CI. Keep `manifest.json` keys
-ordered `domain`, `name`, then alphabetical — hassfest enforces it.
+ordered `domain`, `name`, then alphabetical — hassfest enforces it. The HACS job
+sets `ignore: brands` (a custom-repo install needs no brand icon; to get an icon
++ default-store eligibility, submit the domain to `home-assistant/brands`).
 
 - **Python change** (`__init__.py`): users must **restart Home Assistant** to pick
   it up.
