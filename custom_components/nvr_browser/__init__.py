@@ -19,6 +19,7 @@ import hashlib
 import logging
 import os
 import re
+import secrets
 import time
 from datetime import timedelta
 from http import HTTPStatus
@@ -27,6 +28,7 @@ from urllib.parse import quote
 from aiohttp import web
 import voluptuous as vol
 
+from homeassistant.auth.models import TOKEN_TYPE_LONG_LIVED_ACCESS_TOKEN
 from homeassistant.components import frontend
 from homeassistant.components.http import HomeAssistantView, StaticPathConfig
 from homeassistant.core import HomeAssistant
@@ -48,7 +50,20 @@ PANEL_URL_PATH = "nvr-browser"
 PANEL_TITLE = "NVR"
 PANEL_ICON = "mdi:cctv"
 WEBCOMPONENT_NAME = "nvr-browser-panel"
-VERSION = "0.6.3"
+VERSION = "0.7.0"
+
+# --- TV pairing (device-authorization flow for the Roku app) ---------------
+# A TV has no HA credentials, so it can't just call the authed events API. The
+# pairing flow mints a long-lived token WITHOUT typing it on the TV: the TV gets
+# a short human code (pair/new), shows it, and polls (pair/claim); a logged-in
+# user approves that code from the panel (pair/approve), which mints a long-lived
+# token bound to *their* account and hands it back through the next poll. No
+# token is ever issued without an authenticated user approving a code.
+_PAIR_TTL = timedelta(minutes=5)        # a pending pairing expires this fast
+_PAIR_MAX_PENDING = 20                  # bound the in-memory pending set
+_PAIR_CODE_LEN = 6
+# Unambiguous alphabet for the displayed code (no 0/O/1/I to mis-read on a TV).
+_PAIR_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 # Folder/file shapes produced by the recording automations:
 #   <date>/<hour>/<camera>/HH:MM:SS.mp4           -> the canonical clip
@@ -422,6 +437,121 @@ class NvrClipView(HomeAssistantView):
         return web.FileResponse(src)
 
 
+def _purge_pairings(pairings: dict) -> None:
+    """Drop pending pairings older than the TTL (monotonic clock; in-place)."""
+    now = time.monotonic()
+    ttl = _PAIR_TTL.total_seconds()
+    for code in [c for c, s in pairings.items() if now - s["created"] > ttl]:
+        pairings.pop(code, None)
+
+
+class NvrPairNewView(HomeAssistantView):
+    """Unauthed: a TV starts pairing and gets a short display code + poll secret.
+
+    Safe to leave unauthed because it only creates a *pending* request — no token
+    is issued here. Bounded + TTL'd so it can't be used to exhaust memory.
+    """
+
+    url = "/api/nvr_browser/pair/new"
+    name = "api:nvr_browser:pair:new"
+    requires_auth = False
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def post(self, request: web.Request) -> web.Response:
+        pairings = self.hass.data[DOMAIN]["pairings"]
+        _purge_pairings(pairings)
+        if len(pairings) >= _PAIR_MAX_PENDING:
+            return self.json_message(
+                "too many pending pairings; try again shortly",
+                HTTPStatus.TOO_MANY_REQUESTS,
+            )
+        code = ""
+        for _ in range(10):
+            code = "".join(secrets.choice(_PAIR_CODE_ALPHABET) for _ in range(_PAIR_CODE_LEN))
+            if code not in pairings:
+                break
+        secret = secrets.token_urlsafe(32)
+        pairings[code] = {"secret": secret, "created": time.monotonic(), "token": None}
+        return self.json({"code": code, "secret": secret})
+
+
+class NvrPairClaimView(HomeAssistantView):
+    """Unauthed: the TV polls with its secret; returns the token once approved.
+
+    The secret is a 32-byte unguessable value only the requesting TV holds, so an
+    approved token is delivered only to that TV. Single-use: the session is
+    dropped as soon as the token is handed over.
+    """
+
+    url = "/api/nvr_browser/pair/claim"
+    name = "api:nvr_browser:pair:claim"
+    requires_auth = False
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        secret = request.query.get("secret", "")
+        pairings = self.hass.data[DOMAIN]["pairings"]
+        _purge_pairings(pairings)
+        if not secret:
+            return self.json({"status": "expired"})
+        for code, session in pairings.items():
+            if secrets.compare_digest(session["secret"], secret):
+                if session["token"]:
+                    token = session["token"]
+                    pairings.pop(code, None)   # single-use
+                    return self.json({"status": "approved", "token": token})
+                return self.json({"status": "pending"})
+        return self.json({"status": "expired"})
+
+
+class NvrPairApproveView(HomeAssistantView):
+    """Authed: a logged-in user approves a code, minting a long-lived token.
+
+    This is the ONLY place a token is created, and it's bound to the approving
+    user's account. The token has the same full scope as any HA long-lived token
+    (HA has no per-integration token scoping), so only pair TVs you trust.
+    """
+
+    url = "/api/nvr_browser/pair/approve"
+    name = "api:nvr_browser:pair:approve"
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def post(self, request: web.Request) -> web.Response:
+        try:
+            data = await request.json()
+        except ValueError:
+            return self.json_message("invalid body", HTTPStatus.BAD_REQUEST)
+        code = (data.get("code") or "").strip().upper()
+        pairings = self.hass.data[DOMAIN]["pairings"]
+        _purge_pairings(pairings)
+        session = pairings.get(code)
+        if session is None:
+            return self.json_message("invalid or expired code", HTTPStatus.BAD_REQUEST)
+        if session["token"]:
+            return self.json_message("code already used", HTTPStatus.BAD_REQUEST)
+        user = request["hass_user"]
+        try:
+            refresh_token = await self.hass.auth.async_create_refresh_token(
+                user,
+                client_name=f"NVR Roku ({code}·{session['secret'][:6]})",
+                token_type=TOKEN_TYPE_LONG_LIVED_ACCESS_TOKEN,
+                # Without this the minted access token inherits the 30-min default
+                # and the "long-lived" token would expire almost immediately. HA's
+                # own UI uses a 10-year lifespan for long-lived tokens.
+                access_token_expiration=timedelta(days=3650),
+            )
+        except ValueError as err:
+            return self.json_message(f"could not create token: {err}", HTTPStatus.BAD_REQUEST)
+        session["token"] = self.hass.auth.async_create_access_token(refresh_token)
+        return self.json({"status": "approved"})
+
+
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register the API views and the custom sidebar panel."""
     js_path = os.path.join(os.path.dirname(__file__), "nvr-browser-panel.js")
@@ -429,10 +559,17 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         [StaticPathConfig(STATIC_JS_URL, js_path, False)]
     )
 
+    # Pending TV pairings live in memory (ephemeral, 5-min TTL); a restart just
+    # means re-pairing, which is fine.
+    hass.data.setdefault(DOMAIN, {})["pairings"] = {}
+
     hass.http.register_view(NvrEventsView(hass))
     hass.http.register_view(NvrDaysView(hass))
     hass.http.register_view(NvrThumbView(hass))
     hass.http.register_view(NvrClipView(hass))
+    hass.http.register_view(NvrPairNewView(hass))
+    hass.http.register_view(NvrPairClaimView(hass))
+    hass.http.register_view(NvrPairApproveView(hass))
 
     await hass.async_add_executor_job(lambda: os.makedirs(THUMB_DIR, exist_ok=True))
 
