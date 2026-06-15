@@ -48,7 +48,7 @@ PANEL_URL_PATH = "nvr-browser"
 PANEL_TITLE = "NVR"
 PANEL_ICON = "mdi:cctv"
 WEBCOMPONENT_NAME = "nvr-browser-panel"
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 
 # Folder/file shapes produced by the recording automations:
 #   <date>/<hour>/<camera>/HH:MM:SS.mp4           -> the canonical clip

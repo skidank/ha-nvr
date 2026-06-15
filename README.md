@@ -34,7 +34,8 @@ not exposed by HA's unauthenticated `/local/` route).
 
 ## Endpoints
 
-- `GET /api/nvr_browser/events?offset=&limit=&camera=&object=` — authed JSON list.
+- `GET /api/nvr_browser/events?offset=&limit=&camera=&object=&start=&end=` — authed
+  JSON list (`start`/`end` are inclusive `YYYY-MM-DD` bounds).
 - `GET /api/nvr_browser/thumb?path=<rel>` — JPEG thumbnail (authed; the events
   view hands the frontend short-lived signed URLs so a plain `<img src>` still
   works only for the logged-in user; path is sanitised against traversal).
@@ -75,6 +76,31 @@ nvr_browser:
 ```
 
 Restart Home Assistant. An **NVR** item (cctv icon) then appears in the sidebar.
+
+## Deep-linking (URL parameters)
+
+The panel reads its filters from the page URL, so you can open it pre-filtered
+from anywhere — a dashboard button, a live-camera card's tap action, a Markdown
+link, etc. The supported query params match the event API:
+
+| Param    | Meaning                          | Example                |
+| -------- | -------------------------------- | ---------------------- |
+| `camera` | only this camera                 | `camera=front_door`    |
+| `object` | only clips tagged this object    | `object=person`        |
+| `start`  | inclusive lower date bound       | `start=2026-06-01`     |
+| `end`    | inclusive upper date bound       | `end=2026-06-08`       |
+
+Combine freely, e.g. `/nvr-browser?camera=front_door&object=person`. From a
+Lovelace card, point a navigation at that URL:
+
+```yaml
+tap_action:
+  action: navigate
+  navigation_path: /nvr-browser?camera=front_door
+```
+
+The URL also stays in sync as you change filters in the panel, so the address
+bar always holds a shareable, bookmarkable link to the current view.
 
 ## Removal
 
