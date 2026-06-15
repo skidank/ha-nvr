@@ -47,6 +47,24 @@ not exposed by HA's unauthenticated `/local/` route).
 - `GET /api/nvr_browser/clip?path=<rel>` — original clip stream (authed, signed
   the same way; supports HTTP range requests for `<video>` seeking). Replaces the
   old public `/local/nvr/...` route.
+- `POST /api/nvr_browser/pair/new`, `GET /api/nvr_browser/pair/claim?secret=`,
+  `POST /api/nvr_browser/pair/approve` — TV-pairing flow (see below).
+
+## Pairing a TV (Roku app)
+
+The companion Roku app [`nvr-roku`](https://github.com/skidank/nvr-roku) shows the
+same gallery on a TV. Because a TV can't comfortably type a ~250-character
+long-lived token, it authenticates with a short pairing code instead:
+
+1. Open the NVR app on the Roku — it displays a 6-character code.
+2. In the **NVR** panel, click **Pair TV** and enter that code.
+3. The TV signs in automatically and stays signed in.
+
+Approving a code mints a Home Assistant **long-lived access token** bound to your
+account and hands it to that TV. The token has full HA scope (HA has no
+per-integration scoping), so **only pair TVs you trust**, and only ever approve a
+code you can see on your own screen. Revoke a TV anytime under HA → Profile →
+Security → *Long-lived access tokens* (named `NVR Roku (…)`).
 
 ## Requirements
 

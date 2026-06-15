@@ -12,8 +12,13 @@ thumbnails, click-to-play lightbox) that replaces HA's clunky Media browser for
 the `/config/nvr` motion clips. It must **never** modify the recording automations
 or any file under `/config/nvr`.
 
-Current dev version: **0.6.3**. The released (HACS) version may lag this working
+Current dev version: **0.7.0**. The released (HACS) version may lag this working
 tree — bump `VERSION` when cutting a release (see Releasing).
+
+It also exposes a small **TV-pairing** API so the companion Roku app
+([`nvr-roku`](https://github.com/skidank/nvr-roku)) can authenticate without
+typing a ~250-char long-lived token on a TV keyboard. This is the only part that
+touches HA auth (it mints tokens); it is still read-only w.r.t. `/config/nvr`.
 
 ## Layout
 
@@ -49,6 +54,28 @@ nvr_browser/
   clip via `web.FileResponse` (honours HTTP range requests, so `<video>` seeking
   works). Same `_safe_rel` guard; the events view signs each clip URL the same way
   as thumbs (`_sign_urls`). Replaces the old public `/local/nvr/...` route.
+- **TV pairing** (device-authorization flow for the Roku app; a TV can't type a
+  long-lived token). Three endpoints + an in-memory pending store
+  (`hass.data[DOMAIN]["pairings"]`, keyed by display code, 5-min `_PAIR_TTL`,
+  capped at `_PAIR_MAX_PENDING`, purged by `_purge_pairings`):
+  - **`POST /api/nvr_browser/pair/new`** — **unauthed**. Mints a short display
+    code (`_PAIR_CODE_ALPHABET`, no ambiguous chars) + a 32-byte poll `secret`,
+    stores a pending session, returns both. No token issued here, so leaving it
+    unauthed is safe; the bound+TTL'd store caps abuse.
+  - **`GET /api/nvr_browser/pair/claim?secret=`** — **unauthed**. The TV polls
+    with its secret (matched via `secrets.compare_digest`); returns
+    `{status: pending|approved|expired}` and, once approved, the `token`
+    **once** (the session is then dropped — single-use).
+  - **`POST /api/nvr_browser/pair/approve`** — **authed**. A logged-in user
+    submits the code shown on the TV; mints a **long-lived access token** bound
+    to *their* account (`async_create_refresh_token(..., token_type=
+    TOKEN_TYPE_LONG_LIVED_ACCESS_TOKEN)` → `async_create_access_token`) and
+    attaches it to the session. This is the ONLY place a token is created.
+  - **Security notes:** the minted token has full HA scope (HA has no
+    per-integration scoping) — only pair trusted TVs. Approval is the classic
+    device-grant trust point: a user must only approve a code shown on their own
+    TV (the panel copy says so). The panel's "Pair TV" button drives
+    `pair/approve`; the Roku side lives in the `nvr-roku` repo.
 - **Thumbnails** (`_generate_thumb`): seek ~10s in (`00:00:10`, falling back to
   `3s`/`0s` for short clips), `scale=320:-1`, throttled by `_THUMB_SEM` (3). Cache
   filename = `_thumb_name(rel)` = `sha1(rel).jpg`. **Gotcha that already bit us:**

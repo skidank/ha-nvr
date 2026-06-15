@@ -37,7 +37,7 @@ class NvrBrowserPanel extends HTMLElement {
       const path = e.composedPath();
       if (!path.includes(this._cal) && !path.includes(this._calbtn)) this._closeCalendar();
     };
-    this._onKeydown = (e) => { if (e.key === "Escape") this._closeLightbox(); };
+    this._onKeydown = (e) => { if (e.key === "Escape") { this._closeLightbox(); this._closePair(); } };
   }
 
   // The element may be torn down and rebuilt, OR kept and re-attached, when the
@@ -213,6 +213,22 @@ class NvrBrowserPanel extends HTMLElement {
         .lb .info { color: #ddd; font-size: 14px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
         .lb a { color: #6cb6ff; text-decoration: none; }
         .lb .x { position: absolute; top: 14px; right: 18px; font-size: 30px; cursor: pointer; color: #fff; line-height: 1; }
+        /* pair-a-TV dialog */
+        .pair { position: fixed; inset: 0; z-index: 60; background: rgba(0,0,0,.85); display: none;
+                align-items: center; justify-content: center; padding: 20px; }
+        .pair.show { display: flex; }
+        .pair .box { background: #1f1f1f; color: #e1e1e1; border: 1px solid rgba(255,255,255,.18);
+                     border-radius: 12px; padding: 22px; width: 360px; max-width: 92vw;
+                     box-shadow: 0 8px 24px rgba(0,0,0,.5); display: flex; flex-direction: column; gap: 12px; }
+        .pair h3 { margin: 0; font-size: 17px; }
+        .pair p { margin: 0; font-size: 13px; opacity: .75; line-height: 1.45; }
+        .pair input { font-size: 24px; letter-spacing: 6px; text-align: center; text-transform: uppercase;
+                      padding: 8px; border-radius: 8px; border: 1px solid rgba(255,255,255,.35);
+                      background: rgba(255,255,255,.1); color: inherit; font-variant-numeric: tabular-nums; }
+        .pair .row { display: flex; gap: 8px; justify-content: flex-end; }
+        .pair .msg { font-size: 13px; min-height: 16px; }
+        .pair .msg.err { color: #ff8a80; }
+        .pair .msg.ok { color: #7fdd8a; }
       </style>
       <div class="bar">
         <span class="title">NVR</span>
@@ -227,6 +243,7 @@ class NvrBrowserPanel extends HTMLElement {
         <span class="label">Object</span>
         <select class="sel" id="objs" title="Filter by object"></select>
         <span class="spacer"></span>
+        <button class="btn" id="pairbtn" title="Authorize a TV / Roku app">Pair TV</button>
         <button class="btn" id="refresh">Refresh</button>
       </div>
       <div class="grid" id="grid"></div>
@@ -236,6 +253,20 @@ class NvrBrowserPanel extends HTMLElement {
         <span class="x" id="lbx">&times;</span>
         <video id="lbv" controls playsinline></video>
         <div class="info" id="lbi"></div>
+      </div>
+      <div class="pair" id="pair">
+        <div class="box">
+          <h3>Pair a TV</h3>
+          <p>Open the NVR app on your Roku and enter the code it shows below. The
+             TV will sign in and stay signed in.</p>
+          <input id="paircode" maxlength="6" autocomplete="off" autocapitalize="characters"
+                 spellcheck="false" placeholder="------" aria-label="Pairing code">
+          <div class="msg" id="pairmsg"></div>
+          <div class="row">
+            <button class="btn" id="paircancel">Cancel</button>
+            <button class="btn" id="pairgo">Pair</button>
+          </div>
+        </div>
       </div>`;
 
     this._grid = this.shadowRoot.getElementById("grid");
@@ -248,6 +279,9 @@ class NvrBrowserPanel extends HTMLElement {
     this._lb = this.shadowRoot.getElementById("lb");
     this._lbv = this.shadowRoot.getElementById("lbv");
     this._lbi = this.shadowRoot.getElementById("lbi");
+    this._pair = this.shadowRoot.getElementById("pair");
+    this._paircode = this.shadowRoot.getElementById("paircode");
+    this._pairmsg = this.shadowRoot.getElementById("pairmsg");
 
     this._day.addEventListener("change", () => this._onDaySelect());
     this._cams.addEventListener("change", () => { this._camera = this._cams.value; this._reset(); });
@@ -262,6 +296,11 @@ class NvrBrowserPanel extends HTMLElement {
     this.shadowRoot.getElementById("refresh").addEventListener("click", () => this._reset());
     this.shadowRoot.getElementById("lbx").addEventListener("click", () => this._closeLightbox());
     this._lb.addEventListener("click", (e) => { if (e.target === this._lb) this._closeLightbox(); });
+    this.shadowRoot.getElementById("pairbtn").addEventListener("click", () => this._openPair());
+    this.shadowRoot.getElementById("paircancel").addEventListener("click", () => this._closePair());
+    this.shadowRoot.getElementById("pairgo").addEventListener("click", () => this._submitPair());
+    this._pair.addEventListener("click", (e) => { if (e.target === this._pair) this._closePair(); });
+    this._paircode.addEventListener("keydown", (e) => { if (e.key === "Enter") this._submitPair(); });
 
     this._observer = new IntersectionObserver(
       (entries) => { if (entries.some((e) => e.isIntersecting)) this._loadMore(); },
@@ -573,6 +612,41 @@ class NvrBrowserPanel extends HTMLElement {
     this._lbv.pause();
     this._lbv.removeAttribute("src");
     this._lbv.load();
+  }
+
+  // --- Pair a TV: approve a code shown on a Roku, minting it a long-lived token.
+  _openPair() {
+    this._paircode.value = "";
+    this._setPairMsg("", "");
+    this._pair.classList.add("show");
+    this._paircode.focus();
+  }
+
+  _closePair() {
+    if (!this._pair) return;   // Escape can fire before _boot() builds the dialog
+    this._pair.classList.remove("show");
+  }
+
+  _setPairMsg(text, kind) {
+    if (!this._pairmsg) return;
+    this._pairmsg.textContent = text;   // textContent, not innerHTML — never parse server text
+    this._pairmsg.className = "msg" + (kind ? " " + kind : "");
+  }
+
+  async _submitPair() {
+    const code = (this._paircode.value || "").trim().toUpperCase();
+    if (!code) { this._setPairMsg("Enter the code shown on your TV.", "err"); return; }
+    this._setPairMsg("Pairing…", "");
+    try {
+      await this._hass.callApi("POST", "nvr_browser/pair/approve", { code });
+      this._setPairMsg("Paired! Your TV will connect in a few seconds.", "ok");
+      setTimeout(() => this._closePair(), 2500);
+    } catch (err) {
+      // callApi rejects with the response body ({message} from json_message) or
+      // an Error; surface whatever message we can without trusting its shape.
+      const m = (err && (err.message || (err.body && err.body.message))) || "";
+      this._setPairMsg(m || "Pairing failed — check the code and try again.", "err");
+    }
   }
 }
 
