@@ -12,7 +12,7 @@ thumbnails, click-to-play lightbox) that replaces HA's clunky Media browser for
 the `/config/nvr` motion clips. It must **never** modify the recording automations
 or any file under `/config/nvr`.
 
-Current dev version: **0.7.0**. The released (HACS) version may lag this working
+Current dev version: **0.8.0**. The released (HACS) version may lag this working
 tree — bump `VERSION` when cutting a release (see Releasing).
 
 It also exposes a small **TV-pairing** API so the companion Roku app
@@ -54,6 +54,19 @@ nvr_browser/
   clip via `web.FileResponse` (honours HTTP range requests, so `<video>` seeking
   works). Same `_safe_rel` guard; the events view signs each clip URL the same way
   as thumbs (`_sign_urls`). Replaces the old public `/local/nvr/...` route.
+- **`GET /api/nvr_browser/clip_proxy?path=<rel>`** — **authed**, a Roku-playable
+  transcode of the clip. The source clips are ~5 MP H.264, which Roku's decoder
+  can't handle (it caps H.264 at 1080p → the TV reports `-5 malformed data`), so
+  this transcodes to **≤1080p H.264 + `+faststart`** on first request
+  (`_generate_proxy`: VAAPI/`h264_vaapi` via `_VAAPI_DEVICE`, falling back to
+  software `libx264`), caches it under `PROXY_DIR` (`_proxy_name` = `sha1.mp4`),
+  and serves it range-capably. Throttled by `_PROXY_SEM` (1 at a time). Cap is
+  *height* only (`scale=-2:'min(1080,ih)'`) — fine because the cameras are ~4:3,
+  so width stays under Roku's 1920 limit; revisit for ultra-wide sources. The
+  events list signs an extra **`proxy`** URL per clip (`_sign_urls`); the Roku app
+  plays that, the web panel still uses `url`. Pruned by `_prune_proxies` (same
+  keep-set as thumbs, `_valid_clip_rels`). **Originals under `/config/nvr` are
+  never touched.**
 - **TV pairing** (device-authorization flow for the Roku app; a TV can't type a
   long-lived token). Three endpoints + an in-memory pending store
   (`hass.data[DOMAIN]["pairings"]`, keyed by display code, 5-min `_PAIR_TTL`,
@@ -154,11 +167,15 @@ this deliberately skips the `today`/`yesterday` aliases so events aren't doubled
 ## Environment constraints (important)
 
 - Paths in `__init__.py` are hardcoded to Home Assistant's standard config dir:
-  `/config/nvr` (the clips) and `/config/nvr_thumbs` (our cache). This holds
-  on HAOS / Supervised / Container installs (config dir = `/config`); it will not
-  match a Core/venv install whose config lives elsewhere.
-- Thumbnails shell out to `ffmpeg` on `PATH`. HAOS / Supervised / Container
-  installs bundle `ffmpeg`; a Core install needs it installed separately.
+  `/config/nvr` (the clips), `/config/nvr_thumbs` (thumbnail cache), and
+  `/config/nvr_proxies` (transcoded Roku proxies). This holds on HAOS / Supervised
+  / Container installs (config dir = `/config`); it will not match a Core/venv
+  install whose config lives elsewhere.
+- Thumbnails **and** clip-proxy transcodes shell out to `ffmpeg` on `PATH`. HAOS /
+  Supervised / Container installs bundle `ffmpeg`; a Core install needs it
+  installed separately. The proxy's hardware path also needs VAAPI (`h264_vaapi`)
+  and the iGPU at `_VAAPI_DEVICE` (`/dev/dri/renderD128`) available in the
+  container; if it isn't, `_generate_proxy` falls back to software `libx264`.
 - Installed by dropping `custom_components/nvr_browser/` into the HA config's
   `custom_components/` (HACS does this for users). Copy the folder, never symlink.
 

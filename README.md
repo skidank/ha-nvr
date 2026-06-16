@@ -47,6 +47,10 @@ not exposed by HA's unauthenticated `/local/` route).
 - `GET /api/nvr_browser/clip?path=<rel>` — original clip stream (authed, signed
   the same way; supports HTTP range requests for `<video>` seeking). Replaces the
   old public `/local/nvr/...` route.
+- `GET /api/nvr_browser/clip_proxy?path=<rel>` — authed, a Roku-playable transcode
+  of the clip (≤1080p H.264 + faststart), generated on demand and cached under
+  `/config/nvr_proxies`. The web panel uses the original `clip`; the Roku app uses
+  this. See [Pairing a TV](#pairing-a-tv-roku-app).
 - `POST /api/nvr_browser/pair/new`, `GET /api/nvr_browser/pair/claim?secret=`,
   `POST /api/nvr_browser/pair/approve` — TV-pairing flow (see below).
 
@@ -130,8 +134,9 @@ bar always holds a shareable, bookmarkable link to the current view.
 ## Removal
 
 Remove the `nvr_browser:` line from `configuration.yaml`, uninstall via HACS (or
-delete `custom_components/nvr_browser`), and restart Home Assistant. The
-thumbnail cache at `/config/nvr_thumbs` is safe to delete anytime.
+delete `custom_components/nvr_browser`), and restart Home Assistant. The cache
+dirs `/config/nvr_thumbs` (thumbnails) and `/config/nvr_proxies` (Roku transcodes)
+are safe to delete anytime.
 
 ## Thumbnail cache cleanup
 
