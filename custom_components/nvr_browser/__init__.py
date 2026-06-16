@@ -44,13 +44,16 @@ DOMAIN = "nvr_browser"
 # /api/nvr_browser/clip endpoint instead.
 NVR_DIR = "/config/nvr"
 THUMB_DIR = "/config/nvr_thumbs"
+# Transcoded, Roku-playable renditions (see the clip-proxy section). Separate
+# cache dir; the originals under NVR_DIR are never touched.
+PROXY_DIR = "/config/nvr_proxies"
 
 STATIC_JS_URL = "/nvr_browser_static/nvr-browser-panel.js"
 PANEL_URL_PATH = "nvr-browser"
 PANEL_TITLE = "NVR"
 PANEL_ICON = "mdi:cctv"
 WEBCOMPONENT_NAME = "nvr-browser-panel"
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 
 # --- TV pairing (device-authorization flow for the Roku app) ---------------
 # A TV has no HA credentials, so it can't just call the authed events API. The
@@ -76,6 +79,17 @@ LINK_RE = re.compile(r"^(\d{2}:\d{2}:\d{2})-(.+)\.mp4$")
 # Keep ffmpeg from storming the box: only a few frame-grabs at a time.
 _THUMB_SEM = asyncio.Semaphore(3)
 
+# --- Clip proxy (Roku-playable transcode) ----------------------------------
+# Roku's H.264 decoder maxes out at 1080p, but the source clips are ~5 MP H.264,
+# so the TV reports "-5 malformed data". The clip-proxy endpoint transcodes a
+# clip down to <=1080p H.264 + faststart on first request, caches it, and serves
+# that. Tries the iGPU (VAAPI) and falls back to software libx264.
+_PROXY_SEM = asyncio.Semaphore(1)        # one transcode at a time (CPU/GPU bound)
+_PROXY_MAX_HEIGHT = 1080
+_VAAPI_DEVICE = "/dev/dri/renderD128"
+# A long-ish clip on the software fallback can take ~40s; give it room.
+_PROXY_TIMEOUT = 300
+
 # How often to sweep orphaned thumbnails (whose source clip has rotated out).
 PRUNE_INTERVAL = timedelta(hours=24)
 # Don't delete an in-progress ".part.jpg" younger than this (avoids racing a
@@ -93,6 +107,11 @@ _SIGNED_URL_TTL = timedelta(hours=12)
 def _thumb_name(rel: str) -> str:
     """Cache filename for a clip's relative path (shared by the view and pruner)."""
     return f"{hashlib.sha1(rel.encode()).hexdigest()}.jpg"
+
+
+def _proxy_name(rel: str) -> str:
+    """Cache filename for a clip's transcoded Roku-playable proxy."""
+    return f"{hashlib.sha1(rel.encode()).hexdigest()}.mp4"
 
 CONFIG_SCHEMA = vol.Schema(
     {DOMAIN: vol.Schema({}, extra=vol.ALLOW_EXTRA)}, extra=vol.ALLOW_EXTRA
@@ -203,6 +222,7 @@ def _scan(
                         "camera": ev["camera"],
                         "objects": sorted(ev["objects"]),
                         "url": f"/api/nvr_browser/clip?path={quote(rel)}",
+                        "proxy": f"/api/nvr_browser/clip_proxy?path={quote(rel)}",
                         "thumb": f"/api/nvr_browser/thumb?path={quote(rel)}",
                     }
                 )
@@ -259,9 +279,10 @@ async def _generate_thumb(src: str, dst: str) -> bool:
     return False
 
 
-def _valid_thumb_names() -> set[str]:
-    """Cache filenames for every clip currently on disk (the keep-set)."""
-    names: set[str] = set()
+def _valid_clip_rels() -> set[str]:
+    """Relative paths of every canonical clip currently on disk (the keep-set
+    both the thumbnail and proxy pruners derive their cache names from)."""
+    rels: set[str] = set()
     for date in _list_days():
         ddir = os.path.join(NVR_DIR, date)
         try:
@@ -284,10 +305,15 @@ def _valid_thumb_names() -> set[str]:
                 except OSError:
                     continue
                 for fn in files:
-                    # Only canonical clips (camera folders) back a thumbnail URL.
+                    # Only canonical clips (camera folders) back a thumb/proxy.
                     if BASE_RE.match(fn):
-                        names.add(_thumb_name(f"{date}/{hour}/{folder}/{fn}"))
-    return names
+                        rels.add(f"{date}/{hour}/{folder}/{fn}")
+    return rels
+
+
+def _valid_thumb_names() -> set[str]:
+    """Cache filenames for every clip currently on disk (the keep-set)."""
+    return {_thumb_name(rel) for rel in _valid_clip_rels()}
 
 
 def _prune_thumbs() -> int:
@@ -313,6 +339,102 @@ def _prune_thumbs() -> int:
                 pass
             continue
         if name.endswith(".jpg") and name not in keep:
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
+def _proxy_cmds(src: str, tmp: str) -> list[list[str]]:
+    """ffmpeg argv variants for the Roku proxy, fastest-first.
+
+    Both downscale to <=1080p H.264 + AAC with the moov atom up front
+    (`+faststart`) so Roku can start playback immediately. The source cameras are
+    ~5MP and roughly 4:3, so capping *height* to 1080 keeps width well under
+    Roku's 1920 limit; for any clip already <=1080p, `min` leaves it untouched
+    (no upscaling). First entry uses the iGPU (VAAPI); second is the CPU fallback.
+    """
+    scale = f"scale=-2:'min({_PROXY_MAX_HEIGHT},ih)'"
+    return [
+        # Hardware: CPU decode+scale, upload to the iGPU, hardware H.264 encode.
+        [
+            "ffmpeg", "-nostdin", "-y", "-vaapi_device", _VAAPI_DEVICE, "-i", src,
+            "-vf", f"{scale},format=nv12,hwupload",
+            "-c:v", "h264_vaapi", "-qp", "24",
+            "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-f", "mp4", tmp,
+        ],
+        # Software fallback (libx264). Always works given ffmpeg; just slower.
+        [
+            "ffmpeg", "-nostdin", "-y", "-i", src,
+            "-vf", scale,
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-f", "mp4", tmp,
+        ],
+    ]
+
+
+async def _generate_proxy(src: str, dst: str) -> bool:
+    """Transcode a clip to a cached <=1080p Roku-playable proxy. Writes atomically.
+
+    Tries the VAAPI (iGPU) command first, falls back to software libx264. Like the
+    thumbnail grabber, the temp file is uniquely named so concurrent requests for
+    the same clip can't corrupt each other, and os.replace is atomic.
+    """
+    await asyncio.get_running_loop().run_in_executor(
+        None, lambda: os.makedirs(PROXY_DIR, exist_ok=True)
+    )
+    tmp = f"{dst}.{os.getpid()}.{os.urandom(4).hex()}.part.mp4"
+    last_err = b""
+    async with _PROXY_SEM:
+        for cmd in _proxy_cmds(src, tmp):
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                _, last_err = await asyncio.wait_for(proc.communicate(), timeout=_PROXY_TIMEOUT)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                continue
+            if proc.returncode == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0:
+                os.replace(tmp, dst)
+                return True
+            # Hardware path failed (e.g. no/!busy iGPU) — clean up and try software.
+            if os.path.isfile(tmp):
+                os.remove(tmp)
+    _LOGGER.warning(
+        "nvr_browser: proxy transcode failed for %s: %s",
+        src, last_err.decode(errors="replace")[-300:],
+    )
+    return False
+
+
+def _prune_proxies() -> int:
+    """Delete cached proxies whose source clip has rotated out, plus stale temps.
+    Mirrors _prune_thumbs (same keep-set, .mp4/.part.mp4 instead of .jpg)."""
+    try:
+        entries = os.listdir(PROXY_DIR)
+    except OSError:
+        return 0
+
+    keep = {_proxy_name(rel) for rel in _valid_clip_rels()}
+    now = time.time()
+    removed = 0
+    for name in entries:
+        path = os.path.join(PROXY_DIR, name)
+        if name.endswith(".part.mp4"):
+            try:
+                if now - os.path.getmtime(path) > _PART_STALE_SECONDS:
+                    os.remove(path)
+                    removed += 1
+            except OSError:
+                pass
+            continue
+        if name.endswith(".mp4") and name not in keep:
             try:
                 os.remove(path)
                 removed += 1
@@ -371,6 +493,9 @@ class NvrEventsView(HomeAssistantView):
             try:
                 ev["thumb"] = signer(ev["thumb"], _SIGNED_URL_TTL)
                 ev["url"] = signer(ev["url"], _SIGNED_URL_TTL)
+                # The Roku app plays the transcoded proxy (the original is too
+                # high-res for its decoder); sign that URL the same way.
+                ev["proxy"] = signer(ev["proxy"], _SIGNED_URL_TTL)
             except Exception as err:  # noqa: BLE001 — never let signing 500 the list
                 _LOGGER.warning("nvr_browser: media URL signing failed: %s", err)
                 return
@@ -435,6 +560,33 @@ class NvrClipView(HomeAssistantView):
         if not os.path.isfile(src):
             return web.Response(status=HTTPStatus.NOT_FOUND)
         return web.FileResponse(src)
+
+
+class NvrClipProxyView(HomeAssistantView):
+    """Authed, Roku-playable transcode of a clip (<=1080p H.264 + faststart).
+
+    The originals are ~5MP H.264, which Roku's decoder can't handle. On first
+    request this transcodes + caches a downscaled rendition (VAAPI, else libx264)
+    and serves it range-capably; repeat plays hit the cache. Signed like /clip."""
+
+    url = "/api/nvr_browser/clip_proxy"
+    name = "api:nvr_browser:clip_proxy"
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request: web.Request) -> web.StreamResponse:
+        rel = _safe_rel(request.query.get("path", ""))
+        if not rel:
+            return web.Response(status=HTTPStatus.BAD_REQUEST)
+        src = os.path.join(NVR_DIR, rel)
+        if not os.path.isfile(src):
+            return web.Response(status=HTTPStatus.NOT_FOUND)
+        dst = os.path.join(PROXY_DIR, _proxy_name(rel))
+        if not os.path.isfile(dst):
+            if not await _generate_proxy(src, dst):
+                return web.Response(status=HTTPStatus.INTERNAL_SERVER_ERROR)
+        return web.FileResponse(dst)
 
 
 def _purge_pairings(pairings: dict) -> None:
@@ -567,16 +719,22 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     hass.http.register_view(NvrDaysView(hass))
     hass.http.register_view(NvrThumbView(hass))
     hass.http.register_view(NvrClipView(hass))
+    hass.http.register_view(NvrClipProxyView(hass))
     hass.http.register_view(NvrPairNewView(hass))
     hass.http.register_view(NvrPairClaimView(hass))
     hass.http.register_view(NvrPairApproveView(hass))
 
-    await hass.async_add_executor_job(lambda: os.makedirs(THUMB_DIR, exist_ok=True))
+    await hass.async_add_executor_job(
+        lambda: (os.makedirs(THUMB_DIR, exist_ok=True), os.makedirs(PROXY_DIR, exist_ok=True))
+    )
 
     async def _prune_job(_now=None) -> None:
         removed = await hass.async_add_executor_job(_prune_thumbs)
         if removed:
             _LOGGER.info("nvr_browser: pruned %d orphaned thumbnail(s)", removed)
+        removed = await hass.async_add_executor_job(_prune_proxies)
+        if removed:
+            _LOGGER.info("nvr_browser: pruned %d orphaned proxy clip(s)", removed)
 
     # Sweep once at startup, then daily. Tracks the recording retention: when a
     # day's clips are deleted, the next sweep drops their thumbnails.
