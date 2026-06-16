@@ -237,3 +237,19 @@ Always bump `VERSION` for a JS change so the `?v=` actually changes.
   thing it writes is the thumbnail cache under `/config/nvr_thumbs`.
 - Bump `version` in both `manifest.json` and `VERSION` in `__init__.py` together
   (the panel's `module_url` carries `?v=<VERSION>` for cache-busting).
+- **Companion client / API stability.** The HTTP API (`events`, `days`, `thumb`,
+  `clip`, `clip_proxy`, `pair/*`) is a published contract consumed by the
+  `nvr-roku` Roku app (https://github.com/skidank/nvr-roku) — not just the bundled
+  panel. Prefer **additive** changes. If you make a **breaking** change (remove or
+  rename an endpoint/param, change a response field's name or shape, change
+  signed-URL or pairing behavior), open a tracking issue in nvr-roku so the client
+  is adapted:
+
+  ```
+  gh issue create -R skidank/nvr-roku \
+    --title "Adapt to ha-nvr: <what changed>" \
+    --body "<link to this PR/commit>. <what the client must change>."
+  ```
+
+  The mirror reminder lives in nvr-roku's CLAUDE.md ("Compatibility with
+  `ha-nvr`"). Reference repos by GitHub URL, never local paths.
