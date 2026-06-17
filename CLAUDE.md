@@ -12,13 +12,19 @@ thumbnails, click-to-play lightbox) that replaces HA's clunky Media browser for
 the `/config/nvr` motion clips. It must **never** modify the recording automations
 or any file under `/config/nvr`.
 
-Current dev version: **0.8.0**. The released (HACS) version may lag this working
+Current dev version: **0.9.0**. The released (HACS) version may lag this working
 tree — bump `VERSION` when cutting a release (see Releasing).
 
 It also exposes a small **TV-pairing** API so the companion Roku app
 ([`nvr-roku`](https://github.com/skidank/nvr-roku)) can authenticate without
 typing a ~250-char long-lived token on a TV keyboard. This is the only part that
 touches HA auth (it mints tokens); it is still read-only w.r.t. `/config/nvr`.
+
+Since 0.9.0 it also serves a **live camera view** to the Roku app: a `live_cameras`
+config map points each NVR camera name at an HA camera entity, and the integration
+hands the Roku app HA's own HLS stream URL for it (no proxy/transcode). Still
+read-only w.r.t. `/config/nvr`; the only new HA surface it touches is the `camera`
+component's stream API (read-only).
 
 ## Layout
 
@@ -28,7 +34,7 @@ nvr_browser/
 ├── README.md                       # user-facing: features + install steps
 └── custom_components/nvr_browser/  # the installable component (HACS / copy this folder)
     ├── manifest.json               # YAML-config integration (config_flow: false)
-    ├── __init__.py                 # async_setup: 3 HTTP views + ffmpeg thumbs + prune + panel
+    ├── __init__.py                 # async_setup: HTTP views (events/clip/thumb/proxy/cameras/live/pair) + ffmpeg thumbs/proxies + prune + panel
     └── nvr-browser-panel.js        # vanilla custom element <nvr-browser-panel>
 ```
 
@@ -67,6 +73,32 @@ nvr_browser/
   plays that, the web panel still uses `url`. Pruned by `_prune_proxies` (same
   keep-set as thumbs, `_valid_clip_rels`). **Originals under `/config/nvr` are
   never touched.**
+- **`GET /api/nvr_browser/cameras`** — **authed**, JSON `{cameras: [{name,
+  entity_id, title, available}]}` from the `live_cameras` config map (NVR camera
+  name → HA camera entity). Authoritative list for the Roku app's live-view picker
+  (independent of whether a camera has clips). `available` is a liveness *hint*
+  (entity present, not `unavailable`, advertises `CameraEntityFeature.STREAM`),
+  not a guarantee — `/live` can still fail. Empty map → `{cameras: []}`.
+- **`GET /api/nvr_browser/live?camera=<name>`** — **authed**, JSON `{camera, url,
+  streamFormat: "hls"}`. Roku has no WebRTC, so live uses **HLS**. The integration
+  runs inside HA, so it asks the `camera` component for the stream URL
+  (`camera.async_request_stream(hass, entity_id, "hls")`, capped by
+  `_LIVE_STREAM_TIMEOUT` so a dead source fails fast) and returns HA's **native,
+  root-relative, token-in-path HLS URL** verbatim (e.g.
+  `/api/hls/<token>/master_playlist.m3u8`; the client resolves it against its base
+  URL — that's why live works remotely) — **no proxy, no transcode, no go2rtc
+  coupling**; HA owns the rolling-window muxing and idle teardown. Auth is
+  two-tier like events→signed-clip: the bearer gates *getting* the URL, the
+  stream token (HA stream views are `requires_auth = False`) gates *fetching* it,
+  so the Roku `<video>` needs no header. **Gotchas:** (1) HA *remuxes, doesn't
+  transcode*, so the mapped entity MUST already be ≤1080p H.264 (Roku's decoder
+  limit — same `-5` failure as raw clips); point `live_cameras` at a low-res
+  substream. This is enforced only by config + docs (a 5 MP entity returns `200`
+  but fails on the TV). (2) The URL is **ephemeral** — HA idles a stream out ~30s
+  after playback stops (and on restart), invalidating its token; the client must
+  re-request `/live` on a playback error, not reuse a stale URL. Unknown/absent
+  camera → `404`; unavailable/failed-to-start → `503` (never `502`). `manifest.json`
+  lists `camera`/`stream` in `after_dependencies` so they load first when present.
 - **TV pairing** (device-authorization flow for the Roku app; a TV can't type a
   long-lived token). Three endpoints + an in-memory pending store
   (`hass.data[DOMAIN]["pairings"]`, keyed by display code, 5-min `_PAIR_TTL`,
@@ -192,6 +224,11 @@ do it inside any HA install (a dev venv with `homeassistant`, or `exec` into an 
 container) against a real or sample `/config/nvr`-shaped tree, overriding `NVR_DIR`
 after loading the module. Never write into a live `custom_components/` to test:
 
+The live endpoints (`/cameras`, `/live`) can't be exercised by the `NVR_DIR`
+override — they read `hass.states` and call `camera.async_request_stream`, so test
+them in a running HA with `stream:` + a real camera entity in `live_cameras`
+(hit `/api/nvr_browser/live?camera=<name>` and play the returned URL).
+
 ```python
 import importlib.util
 spec = importlib.util.spec_from_file_location("t", "custom_components/nvr_browser/__init__.py")
@@ -238,9 +275,9 @@ Always bump `VERSION` for a JS change so the `?v=` actually changes.
 - Bump `version` in both `manifest.json` and `VERSION` in `__init__.py` together
   (the panel's `module_url` carries `?v=<VERSION>` for cache-busting).
 - **Companion client / API stability.** The HTTP API (`events`, `days`, `thumb`,
-  `clip`, `clip_proxy`, `pair/*`) is a published contract consumed by the
-  `nvr-roku` Roku app (https://github.com/skidank/nvr-roku) — not just the bundled
-  panel. Prefer **additive** changes. If you make a **breaking** change (remove or
+  `clip`, `clip_proxy`, `cameras`, `live`, `pair/*`) is a published contract
+  consumed by the `nvr-roku` Roku app (https://github.com/skidank/nvr-roku) — not
+  just the bundled panel. Prefer **additive** changes. If you make a **breaking** change (remove or
   rename an endpoint/param, change a response field's name or shape, change
   signed-URL or pairing behavior), open a tracking issue in nvr-roku so the client
   is adapted:
