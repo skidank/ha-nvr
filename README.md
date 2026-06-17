@@ -52,7 +52,9 @@ not exposed by HA's unauthenticated `/local/` route).
   `/config/nvr_proxies`. The web panel uses the original `clip`; the Roku app uses
   this. See [Pairing a TV](#pairing-a-tv-roku-app).
 - `GET /api/nvr_browser/cameras` — authed JSON list of live-capable cameras (from
-  the `live_cameras` map); powers the Roku app's live-view picker.
+  the `live_cameras` map); powers the Roku app's live-view picker. Each available
+  camera also carries a signed `thumb` (a current snapshot via HA's
+  `camera_proxy`) so the app can show a preview tile, like clip thumbnails.
 - `GET /api/nvr_browser/live?camera=<name>` — authed JSON `{camera, url,
   streamFormat:"hls"}`; returns Home Assistant's own same-origin HLS URL for that
   camera's live stream (no transcode). See
@@ -102,6 +104,9 @@ base URL — that's *why* live works remotely with no extra host config.
 > on the TV with a decoder error. Point it at a **low-resolution substream** (most
 > IP cameras expose one). Requires the `stream:` integration (enabled by default)
 > and a stream-capable camera entity.
+
+The Roku live-camera picker shows a current snapshot per available camera (a
+signed `camera_proxy` still), the same way clip thumbnails work.
 
 Leaving `live_cameras` out (or empty) disables live entirely. This is a
 Python-side feature, so **restart Home Assistant** after adding it. The web

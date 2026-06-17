@@ -57,7 +57,7 @@ PANEL_URL_PATH = "nvr-browser"
 PANEL_TITLE = "NVR"
 PANEL_ICON = "mdi:cctv"
 WEBCOMPONENT_NAME = "nvr-browser-panel"
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 
 # --- TV pairing (device-authorization flow for the Roku app) ---------------
 # A TV has no HA credentials, so it can't just call the authed events API. The
@@ -474,6 +474,27 @@ def _prune_proxies() -> int:
     return removed
 
 
+def _get_signer(hass: HomeAssistant):
+    """Return a `(path, ttl) -> signed_url` callable, or None if unavailable.
+
+    HA's signed-path helper lets an authenticated request mint a time-limited,
+    refresh-token-bound URL so a plain `<img>`/`<video>`/Roku `Poster` (which
+    can't send a bearer token) still loads only for the user who fetched the
+    list. The canonical API is the module function; we also probe
+    `hass.http.async_sign_path` first in case a build/fork exposes it there.
+    Shared by the events view (clip thumb/clip/proxy URLs) and the cameras view
+    (camera snapshot URLs)."""
+    signer = getattr(hass.http, "async_sign_path", None)
+    if signer is not None:
+        return signer
+    try:
+        from homeassistant.components.http.auth import async_sign_path
+    except ImportError:
+        _LOGGER.warning("nvr_browser: async_sign_path unavailable; media won't load")
+        return None
+    return lambda path, exp: async_sign_path(hass, path, exp)  # noqa: E731
+
+
 class NvrEventsView(HomeAssistantView):
     """Authed JSON list of events, newest first."""
 
@@ -510,16 +531,9 @@ class NvrEventsView(HomeAssistantView):
         (authenticated) request mints a time-limited, refresh-token-bound URL per
         asset, so media loads for this user without exposing an unauthed endpoint.
         """
-        signer = getattr(self.hass.http, "async_sign_path", None)
+        signer = _get_signer(self.hass)
         if signer is None:
-            try:
-                from homeassistant.components.http.auth import async_sign_path
-            except ImportError:
-                _LOGGER.warning(
-                    "nvr_browser: async_sign_path unavailable; media won't load"
-                )
-                return
-            signer = lambda path, exp: async_sign_path(self.hass, path, exp)  # noqa: E731
+            return
         for ev in events:
             try:
                 ev["thumb"] = signer(ev["thumb"], _SIGNED_URL_TTL)
@@ -625,8 +639,10 @@ class NvrCamerasView(HomeAssistantView):
 
     Authoritative list for the Roku app's "Watch live" picker — independent of
     whether a camera has recorded clips. `available` is a liveness *hint* (entity
-    present, not unavailable, advertises STREAM), not a guarantee: a camera can
-    still fail /live if its underlying source is dead, so the client must cope.
+    present, state not in `_LIVE_UNAVAILABLE_STATES`, advertises STREAM), not a
+    guarantee: a camera can still fail /live if its underlying source is dead, so
+    the client must cope. Available cameras also carry a signed `thumb` (a current
+    still via HA's camera_proxy) for the picker tile.
     """
 
     url = "/api/nvr_browser/cameras"
@@ -637,6 +653,7 @@ class NvrCamerasView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         live_cameras = self.hass.data[DOMAIN].get("live_cameras", {})
+        signer = _get_signer(self.hass)
         cameras = []
         for name in sorted(live_cameras):
             entity_id = live_cameras[name]
@@ -651,14 +668,30 @@ class NvrCamerasView(HomeAssistantView):
                 (state and state.attributes.get("friendly_name"))
                 or name.replace("_", " ").title()
             )
-            cameras.append(
-                {
-                    "name": name,
-                    "entity_id": entity_id,
-                    "title": title,
-                    "available": available,
-                }
-            )
+            cam = {
+                "name": name,
+                "entity_id": entity_id,
+                "title": title,
+                "available": available,
+            }
+            # A signed snapshot URL the Roku Poster can load without a bearer (same
+            # async_sign_path mechanism as clip thumbs). Gated on `available` — the
+            # *live* gate, reused as a best-effort still gate: STREAM capability
+            # doesn't strictly imply still support, but either way a camera that
+            # can't produce a frame just makes camera_proxy error and the client
+            # falls back to a placeholder tile. Stills are served on demand by HA's
+            # camera component (no caching/pruning/ffmpeg of our own).
+            if available and signer is not None:
+                try:
+                    cam["thumb"] = signer(
+                        f"/api/camera_proxy/{entity_id}", _SIGNED_URL_TTL
+                    )
+                except Exception as err:  # noqa: BLE001 — never let signing 500 the list
+                    _LOGGER.warning(
+                        "nvr_browser: camera thumb signing failed for %s: %s",
+                        entity_id, err,
+                    )
+            cameras.append(cam)
         return self.json({"cameras": cameras})
 
 

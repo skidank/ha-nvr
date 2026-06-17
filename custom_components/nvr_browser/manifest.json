@@ -8,5 +8,5 @@
   "documentation": "https://github.com/skidank/ha-nvr",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/skidank/ha-nvr/issues",
-  "version": "0.9.0"
+  "version": "0.9.1"
 }

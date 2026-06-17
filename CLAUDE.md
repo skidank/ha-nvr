@@ -12,7 +12,7 @@ thumbnails, click-to-play lightbox) that replaces HA's clunky Media browser for
 the `/config/nvr` motion clips. It must **never** modify the recording automations
 or any file under `/config/nvr`.
 
-Current dev version: **0.9.0**. The released (HACS) version may lag this working
+Current dev version: **0.9.1**. The released (HACS) version may lag this working
 tree — bump `VERSION` when cutting a release (see Releasing).
 
 It also exposes a small **TV-pairing** API so the companion Roku app
@@ -74,11 +74,17 @@ nvr_browser/
   keep-set as thumbs, `_valid_clip_rels`). **Originals under `/config/nvr` are
   never touched.**
 - **`GET /api/nvr_browser/cameras`** — **authed**, JSON `{cameras: [{name,
-  entity_id, title, available}]}` from the `live_cameras` config map (NVR camera
-  name → HA camera entity). Authoritative list for the Roku app's live-view picker
-  (independent of whether a camera has clips). `available` is a liveness *hint*
-  (entity present, not `unavailable`, advertises `CameraEntityFeature.STREAM`),
-  not a guarantee — `/live` can still fail. Empty map → `{cameras: []}`.
+  entity_id, title, available, thumb?}]}` from the `live_cameras` config map (NVR
+  camera name → HA camera entity). Authoritative list for the Roku app's live-view
+  picker (independent of whether a camera has clips). `available` is a liveness
+  *hint* (entity present, not in `_LIVE_UNAVAILABLE_STATES`, advertises
+  `CameraEntityFeature.STREAM`), not a guarantee — `/live` can still fail. `thumb`
+  (added 0.9.1, **available cameras only**) is a *signed* URL to a current still —
+  `async_sign_path` over HA's `/api/camera_proxy/<entity_id>` (the shared
+  `_get_signer`, same mechanism as clip thumbs) so the Roku `Poster` loads it with
+  no bearer; absent for a down camera (client falls back to a placeholder tile).
+  Stills are served on demand by HA's camera component — no cache/prune/ffmpeg of
+  our own. Empty map → `{cameras: []}`.
 - **`GET /api/nvr_browser/live?camera=<name>`** — **authed**, JSON `{camera, url,
   streamFormat: "hls"}`. Roku has no WebRTC, so live uses **HLS**. The integration
   runs inside HA, so it asks the `camera` component for the stream URL
@@ -226,8 +232,10 @@ after loading the module. Never write into a live `custom_components/` to test:
 
 The live endpoints (`/cameras`, `/live`) can't be exercised by the `NVR_DIR`
 override — they read `hass.states` and call `camera.async_request_stream`, so test
-them in a running HA with `stream:` + a real camera entity in `live_cameras`
-(hit `/api/nvr_browser/live?camera=<name>` and play the returned URL).
+them in a running HA with `stream:` + a real camera entity in `live_cameras`: hit
+`/api/nvr_browser/live?camera=<name>` and play the returned URL, and hit
+`/api/nvr_browser/cameras` to confirm each available camera carries a `thumb` that
+loads with no `Authorization` header.
 
 ```python
 import importlib.util
