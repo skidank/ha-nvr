@@ -51,6 +51,12 @@ not exposed by HA's unauthenticated `/local/` route).
   of the clip (≤1080p H.264 + faststart), generated on demand and cached under
   `/config/nvr_proxies`. The web panel uses the original `clip`; the Roku app uses
   this. See [Pairing a TV](#pairing-a-tv-roku-app).
+- `GET /api/nvr_browser/cameras` — authed JSON list of live-capable cameras (from
+  the `live_cameras` map); powers the Roku app's live-view picker.
+- `GET /api/nvr_browser/live?camera=<name>` — authed JSON `{camera, url,
+  streamFormat:"hls"}`; returns Home Assistant's own same-origin HLS URL for that
+  camera's live stream (no transcode). See
+  [Live camera streaming](#live-camera-streaming-roku-app).
 - `POST /api/nvr_browser/pair/new`, `GET /api/nvr_browser/pair/claim?secret=`,
   `POST /api/nvr_browser/pair/approve` — TV-pairing flow (see below).
 
@@ -70,6 +76,37 @@ per-integration scoping), so **only pair TVs you trust**, and only ever approve 
 code you can see on your own screen. Revoke a TV anytime under HA → Profile →
 Security → *Long-lived access tokens* (named `NVR Roku (…)`).
 
+## Live camera streaming (Roku app)
+
+The Roku app can also show a **live** camera view, not just recorded clips. This
+is opt-in via a `live_cameras` map in `configuration.yaml` that points each NVR
+camera name at a Home Assistant camera entity:
+
+```yaml
+nvr_browser:
+  live_cameras:
+    backyard: camera.backyard_sub    # MUST be a <=1080p H.264 entity
+    porch:    camera.porch_sub
+```
+
+The integration returns Home Assistant's own HLS stream URL for that entity
+(served by the built-in `stream:` integration). It does **not** transcode. The
+URL is a **root-relative, self-tokenized path** (e.g.
+`/api/hls/<token>/master_playlist.m3u8`), which the app resolves against its own
+base URL — that's *why* live works remotely with no extra host config.
+
+> **The mapped entity must be ≤1080p H.264.** Roku's decoder caps H.264 at 1080p
+> — the same limit that makes recorded clips need a transcoded proxy. Home
+> Assistant *remuxes* the live stream without transcoding, so pointing
+> `live_cameras` at a full ~5 MP main stream produces a URL that loads but fails
+> on the TV with a decoder error. Point it at a **low-resolution substream** (most
+> IP cameras expose one). Requires the `stream:` integration (enabled by default)
+> and a stream-capable camera entity.
+
+Leaving `live_cameras` out (or empty) disables live entirely. This is a
+Python-side feature, so **restart Home Assistant** after adding it. The web
+sidebar panel is unchanged — live is a Roku-app feature.
+
 ## Requirements
 
 - A Home Assistant install whose config directory is `/config` — HAOS,
@@ -77,6 +114,9 @@ Security → *Long-lived access tokens* (named `NVR Roku (…)`).
   `/config/nvr` and `/config/nvr_thumbs`, so a Core/venv install with a
   different config path won't work as-is.
 - `ffmpeg` available to Home Assistant (bundled on HAOS / Supervised / Container).
+- Live view (optional) additionally needs the `stream:` integration (enabled by
+  default) and a stream-capable, ≤1080p H.264 camera entity — see
+  [Live camera streaming](#live-camera-streaming-roku-app).
 - Your motion clips already under `/config/nvr/` in the layout above (your
   recording automations must write there, **not** under `www/`).
 
@@ -105,6 +145,9 @@ nvr_browser:
 ```
 
 Restart Home Assistant. An **NVR** item (cctv icon) then appears in the sidebar.
+
+To also stream **live** cameras to the Roku app, add the optional `live_cameras`
+map — see [Live camera streaming](#live-camera-streaming-roku-app).
 
 ## Deep-linking (URL parameters)
 

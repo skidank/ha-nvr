@@ -6,6 +6,8 @@ recording automations or any file under /config/nvr. It exposes:
   * GET /api/nvr_browser/events  (authed) — newest-first event list, paginated
   * GET /api/nvr_browser/thumb   (authed) — ffmpeg frame-grab, cached to disk
   * GET /api/nvr_browser/clip    (authed) — original clip stream (range-capable)
+  * GET /api/nvr_browser/cameras (authed) — live-capable cameras (live_cameras map)
+  * GET /api/nvr_browser/live    (authed) — HA HLS URL for a camera's live stream
   * a custom sidebar panel ("NVR") rendering the gallery
 
 Clips live under /config/nvr — OUTSIDE www/, so they are not exposed by HA's
@@ -29,9 +31,11 @@ from aiohttp import web
 import voluptuous as vol
 
 from homeassistant.auth.models import TOKEN_TYPE_LONG_LIVED_ACCESS_TOKEN
-from homeassistant.components import frontend
+from homeassistant.components import camera, frontend
+from homeassistant.components.camera import CameraEntityFeature
 from homeassistant.components.http import HomeAssistantView, StaticPathConfig
 from homeassistant.core import HomeAssistant
+import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import ConfigType
 
@@ -53,7 +57,7 @@ PANEL_URL_PATH = "nvr-browser"
 PANEL_TITLE = "NVR"
 PANEL_ICON = "mdi:cctv"
 WEBCOMPONENT_NAME = "nvr-browser-panel"
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 
 # --- TV pairing (device-authorization flow for the Roku app) ---------------
 # A TV has no HA credentials, so it can't just call the authed events API. The
@@ -90,6 +94,20 @@ _VAAPI_DEVICE = "/dev/dri/renderD128"
 # A long-ish clip on the software fallback can take ~40s; give it room.
 _PROXY_TIMEOUT = 300
 
+# --- Live streaming (Roku live view) ----------------------------------------
+# Roku has no WebRTC; the only live transport it plays is HLS. HA's stream
+# integration already serves a tokenized, same-origin HLS URL per camera entity,
+# so /live just hands that URL to the client (no proxy, no transcode). The
+# streamed entity MUST be <=1080p H.264 (Roku's decoder limit — the same reason
+# clips need a proxy); the operator points each camera at a Roku-playable
+# substream via the `live_cameras` config map. The URL is EPHEMERAL: HA idles a
+# stream out ~30s after playback stops (and on restart), invalidating its token,
+# so the client must re-request /live on a playback error, not reuse a stale URL.
+_LIVE_STREAM_TIMEOUT = 15        # backstop cap (HA bounds the source fetch internally, ~10s)
+# Camera states a live stream can't start from (HA raises "Camera is off" for
+# `off`); /cameras won't advertise these and /live rejects them up front.
+_LIVE_UNAVAILABLE_STATES = ("unavailable", "unknown", "off")
+
 # How often to sweep orphaned thumbnails (whose source clip has rotated out).
 PRUNE_INTERVAL = timedelta(hours=24)
 # Don't delete an in-progress ".part.jpg" younger than this (avoids racing a
@@ -113,8 +131,21 @@ def _proxy_name(rel: str) -> str:
     """Cache filename for a clip's transcoded Roku-playable proxy."""
     return f"{hashlib.sha1(rel.encode()).hexdigest()}.mp4"
 
+# `nvr_browser:` is commonly an empty (None) block; vol.Any(None, ...) keeps that
+# valid. `live_cameras` (optional) maps an NVR camera name -> the HA camera
+# entity to stream live for the Roku app; cv.entity_domain enforces a camera
+# entity. Absent/empty => live is disabled (/cameras returns [], /live 404s).
 CONFIG_SCHEMA = vol.Schema(
-    {DOMAIN: vol.Schema({}, extra=vol.ALLOW_EXTRA)}, extra=vol.ALLOW_EXTRA
+    {
+        DOMAIN: vol.Any(
+            None,
+            vol.Schema(
+                {vol.Optional("live_cameras"): {cv.string: cv.entity_domain("camera")}},
+                extra=vol.ALLOW_EXTRA,
+            ),
+        )
+    },
+    extra=vol.ALLOW_EXTRA,
 )
 
 
@@ -589,6 +620,99 @@ class NvrClipProxyView(HomeAssistantView):
         return web.FileResponse(dst)
 
 
+class NvrCamerasView(HomeAssistantView):
+    """Authed list of live-capable cameras (from the `live_cameras` config map).
+
+    Authoritative list for the Roku app's "Watch live" picker — independent of
+    whether a camera has recorded clips. `available` is a liveness *hint* (entity
+    present, not unavailable, advertises STREAM), not a guarantee: a camera can
+    still fail /live if its underlying source is dead, so the client must cope.
+    """
+
+    url = "/api/nvr_browser/cameras"
+    name = "api:nvr_browser:cameras"
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        live_cameras = self.hass.data[DOMAIN].get("live_cameras", {})
+        cameras = []
+        for name in sorted(live_cameras):
+            entity_id = live_cameras[name]
+            state = self.hass.states.get(entity_id)
+            features = state.attributes.get("supported_features", 0) if state else 0
+            available = (
+                state is not None
+                and state.state not in _LIVE_UNAVAILABLE_STATES
+                and bool(features & CameraEntityFeature.STREAM)
+            )
+            title = (
+                (state and state.attributes.get("friendly_name"))
+                or name.replace("_", " ").title()
+            )
+            cameras.append(
+                {
+                    "name": name,
+                    "entity_id": entity_id,
+                    "title": title,
+                    "available": available,
+                }
+            )
+        return self.json({"cameras": cameras})
+
+
+class NvrLiveView(HomeAssistantView):
+    """Authed: returns HA's native HLS URL for a camera's live stream.
+
+    Roku has no WebRTC, so live uses HLS. HA's stream integration already serves a
+    tokenized, same-origin HLS URL per camera entity; we just hand that URL to the
+    client (no proxy, no transcode). The URL self-authorizes via the token in its
+    path (HA's stream views are unauthed-but-tokenized), so the Roku <video> needs
+    no bearer — same model as the signed clip URLs. The URL is EPHEMERAL (see
+    _LIVE_STREAM_TIMEOUT note): the client must re-request /live on a playback
+    error, not reuse a stale one.
+    """
+
+    url = "/api/nvr_browser/live"
+    name = "api:nvr_browser:live"
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        name = request.query.get("camera", "")
+        live_cameras = self.hass.data[DOMAIN].get("live_cameras", {})
+        # The entity_id is taken ONLY from the operator-configured map, never from
+        # the request — that (not a path sanitiser) is the abuse defence.
+        entity_id = live_cameras.get(name)
+        if not entity_id:
+            return self.json_message("unknown live camera", HTTPStatus.NOT_FOUND)
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state in _LIVE_UNAVAILABLE_STATES:
+            return self.json_message(
+                "camera unavailable", HTTPStatus.SERVICE_UNAVAILABLE
+            )
+        try:
+            # Backstop timeout: async_request_stream fetches the source + spawns the
+            # HLS worker (HA bounds the source fetch internally, ~10s); cap it here
+            # too so a wedged start can't hold the request open. A cancelled start
+            # may leave a cached Stream on the entity — harmless: HA reuses it on the
+            # next request and idles it out.
+            url = await asyncio.wait_for(
+                camera.async_request_stream(self.hass, entity_id, "hls"),
+                timeout=_LIVE_STREAM_TIMEOUT,
+            )
+        except Exception as err:  # noqa: BLE001 — any start failure => 503, never 500
+            _LOGGER.warning(
+                "nvr_browser: live stream start failed for %s: %s", entity_id, err
+            )
+            return self.json_message(
+                "camera stream unavailable", HTTPStatus.SERVICE_UNAVAILABLE
+            )
+        return self.json({"camera": name, "url": url, "streamFormat": "hls"})
+
+
 def _purge_pairings(pairings: dict) -> None:
     """Drop pending pairings older than the TTL (monotonic clock; in-place)."""
     now = time.monotonic()
@@ -713,13 +837,18 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     # Pending TV pairings live in memory (ephemeral, 5-min TTL); a restart just
     # means re-pairing, which is fine.
-    hass.data.setdefault(DOMAIN, {})["pairings"] = {}
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    domain_data["pairings"] = {}
+    # Live-stream map: NVR camera name -> HA camera entity_id (empty => live off).
+    domain_data["live_cameras"] = (config.get(DOMAIN) or {}).get("live_cameras", {})
 
     hass.http.register_view(NvrEventsView(hass))
     hass.http.register_view(NvrDaysView(hass))
     hass.http.register_view(NvrThumbView(hass))
     hass.http.register_view(NvrClipView(hass))
     hass.http.register_view(NvrClipProxyView(hass))
+    hass.http.register_view(NvrCamerasView(hass))
+    hass.http.register_view(NvrLiveView(hass))
     hass.http.register_view(NvrPairNewView(hass))
     hass.http.register_view(NvrPairClaimView(hass))
     hass.http.register_view(NvrPairApproveView(hass))
