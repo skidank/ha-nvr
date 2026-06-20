@@ -250,8 +250,15 @@ for e in m._scan(0, 8, None, None):
 
 Distributed as a HACS-installable custom integration (users can also copy it into
 `custom_components/` manually). There is **no private-host deploy step** in this
-repo — cut a release by bumping the version and tagging, and HACS serves the
-tagged release to users. User-facing install steps live in README.md.
+repo — cut a release by bumping the version and publishing a **GitHub Release**,
+and HACS serves that release to users. User-facing install steps live in README.md.
+
+To cut a release: bump the version (see below), commit, then
+`gh release create <vX.Y.Z> --title <vX.Y.Z> --notes "<summary>"`. **HACS picks up
+new versions from published GitHub Releases, not from bare git tags** — a tag
+alone (e.g. `git tag` + `git push --tags`) will NOT surface the update to users,
+so always publish an actual Release (`gh release create` tags and releases in one
+step). Match the release tag to the bumped `version`.
 
 HACS wiring lives in `hacs.json` (root) + the `version`/`documentation`/
 `issue_tracker`/`codeowners` keys in `manifest.json`. `.github/workflows/validate.yml`
