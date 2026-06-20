@@ -55,9 +55,9 @@ PROXY_DIR = "/config/nvr_proxies"
 STATIC_JS_URL = "/nvr_browser_static/nvr-browser-panel.js"
 PANEL_URL_PATH = "nvr-browser"
 PANEL_TITLE = "NVR"
-PANEL_ICON = "mdi:cctv"
+PANEL_ICON = "mdi:filmstrip-box-multiple"
 WEBCOMPONENT_NAME = "nvr-browser-panel"
-VERSION = "0.9.1"
+VERSION = "0.9.2"
 
 # --- TV pairing (device-authorization flow for the Roku app) ---------------
 # A TV has no HA credentials, so it can't just call the authed events API. The
