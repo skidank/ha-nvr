@@ -12,7 +12,7 @@ thumbnails, click-to-play lightbox) that replaces HA's clunky Media browser for
 the `/config/nvr` motion clips. It must **never** modify the recording automations
 or any file under `/config/nvr`.
 
-Current dev version: **0.9.2**. The released (HACS) version may lag this working
+Current dev version: **0.9.3**. The released (HACS) version may lag this working
 tree — bump `VERSION` when cutting a release (see Releasing).
 
 It also exposes a small **TV-pairing** API so the companion Roku app
@@ -47,6 +47,10 @@ nvr_browser/
 - **`GET /api/nvr_browser/events`** — authed JSON, newest-first, paginated.
   Params: `offset`, `limit`, `camera`, `object`, `start`, `end` (inclusive
   `YYYY-MM-DD` bounds, validated against `DATE_RE`). Scan runs in an executor.
+  Each event also carries `mtime` (canonical clip's `st_mtime`, Unix seconds,
+  float) and `size` (bytes) since 0.9.3, so a client can tell a finished clip
+  from one still recording (`nvr-view.py` on the server, which builds the
+  Jellyfin view, treats size > 0 and mtime ≥ 120 s old as finished). Additive.
 - **`GET /api/nvr_browser/days`** — authed JSON `{days: [...]}`, the available
   `YYYY-MM-DD` folders newest-first; the panel uses it to populate the Day
   dropdown, to bound the range-picker calendar, and to dot the days that have
@@ -191,7 +195,7 @@ The recording automations write two shapes per hour folder:
 
 ```
 <date>/<hour>/<camera>/HH:MM:SS.mp4           # canonical clip; folder name = camera
-<date>/<hour>/<object>/HH:MM:SS-<camera>.mp4  # HARD LINK; folder name = object label
+<date>/<hour>/<object>/HH:MM:SS-<camera>.mp4  # RELATIVE SYMLINK (../<camera>/HH:MM:SS.mp4); folder name = object label
 ```
 
 `_build_hour` collapses these into events keyed by `(time, camera)`:

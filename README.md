@@ -26,7 +26,7 @@ The recording automations produce two shapes per hour folder:
 
 ```
 <date>/<hour>/<camera>/HH:MM:SS.mp4           # the canonical clip
-<date>/<hour>/<object>/HH:MM:SS-<camera>.mp4  # hard link tagging that clip
+<date>/<hour>/<object>/HH:MM:SS-<camera>.mp4  # relative symlink tagging that clip
 ```
 
 The integration joins them on `(time, camera)`: a folder whose files match

@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import secrets
+import stat
 import time
 from datetime import timedelta
 from http import HTTPStatus
@@ -57,7 +58,7 @@ PANEL_URL_PATH = "nvr-browser"
 PANEL_TITLE = "NVR"
 PANEL_ICON = "mdi:filmstrip-box-multiple"
 WEBCOMPONENT_NAME = "nvr-browser-panel"
-VERSION = "0.9.2"
+VERSION = "0.9.3"
 
 # --- TV pairing (device-authorization flow for the Roku app) ---------------
 # A TV has no HA credentials, so it can't just call the authed events API. The
@@ -74,7 +75,7 @@ _PAIR_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 # Folder/file shapes produced by the recording automations:
 #   <date>/<hour>/<camera>/HH:MM:SS.mp4           -> the canonical clip
-#   <date>/<hour>/<object>/HH:MM:SS-<camera>.mp4  -> hard link tagging the clip
+#   <date>/<hour>/<object>/HH:MM:SS-<camera>.mp4  -> relative symlink tagging the clip
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 HOUR_RE = re.compile(r"^\d{2}:00$")
 BASE_RE = re.compile(r"^(\d{2}:\d{2}:\d{2})\.mp4$")
@@ -242,7 +243,11 @@ def _scan(
                 if obj and obj not in ev["objects"]:
                     continue
                 rel = f"{date}/{hour}/{ev['camera']}/{ev['time']}.mp4"
-                if not os.path.isfile(os.path.join(NVR_DIR, rel)):
+                try:
+                    st = os.stat(os.path.join(NVR_DIR, rel))
+                except OSError:
+                    continue
+                if not stat.S_ISREG(st.st_mode):
                     continue
                 results.append(
                     {
@@ -255,6 +260,10 @@ def _scan(
                         "url": f"/api/nvr_browser/clip?path={quote(rel)}",
                         "proxy": f"/api/nvr_browser/clip_proxy?path={quote(rel)}",
                         "thumb": f"/api/nvr_browser/thumb?path={quote(rel)}",
+                        # Lets a client tell a finished clip from one still
+                        # recording (size > 0 and mtime old enough).
+                        "mtime": st.st_mtime,
+                        "size": st.st_size,
                     }
                 )
             if len(results) >= need:
