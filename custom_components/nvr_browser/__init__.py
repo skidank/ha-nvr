@@ -232,7 +232,10 @@ def _list_facets() -> dict[str, list[str]]:
                 continue  # hour rotated out mid-scan
             with folders:
                 for folder in folders:
-                    if folder.name in cameras or folder.name in objects:
+                    # Skip only names already seen as BOTH kinds, so a camera
+                    # folder named like an object label (or vice versa) is
+                    # still classified wherever it appears.
+                    if folder.name in cameras and folder.name in objects:
                         continue
                     try:
                         if not folder.is_dir():

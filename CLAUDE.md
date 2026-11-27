@@ -41,7 +41,7 @@ nvr_browser/
 ## Architecture
 
 - **`async_setup`** (YAML-triggered by `nvr_browser:` in configuration.yaml):
-  registers a static path for the JS, three HTTP views, the thumb cache dir, the
+  registers a static path for the JS, the HTTP views (see below), the thumb cache dir, the
   scheduled prune job, and a custom sidebar panel via
   `frontend.async_register_built_in_panel(..., "custom", ...)`.
 - **`GET /api/nvr_browser/events`** — authed JSON, newest-first, paginated.
@@ -60,9 +60,10 @@ nvr_browser/
   disk (`_list_facets`, executor). Walks the `DATE_RE` date folders like `/days`;
   a folder holding a `BASE_RE` clip is a camera, one holding a `LINK_RE` symlink
   is an object — only the first matching file per folder is inspected. The panel
-  calls it on boot and every `_reset` (`_loadFacets` → `_mergeFacets`) so a camera
-  with no recent clips still shows in the dropdown; `_addFacets` still merges
-  names from loaded events. Facets are merge-only (never removed). Deliberately
+  calls it on boot and on the Refresh button (`_loadFacets` → `_mergeFacets`;
+  not on every filter change — it is a whole-tree walk and a filter change can't
+  add names) so a camera with no recent clips still shows in the dropdown;
+  `_addFacets` still merges names from loaded events. Facets are merge-only (never removed). Deliberately
   NVR-tree only, not HA camera entities (some entities never record).
 - **`GET /api/nvr_browser/thumb?path=<rel>`** — **authed**, generates a cached
   ffmpeg frame-grab. A plain `<img src>` can't send a bearer token, so the events

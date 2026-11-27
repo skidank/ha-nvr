@@ -293,7 +293,7 @@ class NvrBrowserPanel extends HTMLElement {
     this._calbtn.addEventListener("click", () => this._toggleCalendar());
     // Outside-click (close calendar) and Escape (close lightbox) live on
     // `document`, so they're registered/removed in connected/disconnectedCallback.
-    this.shadowRoot.getElementById("refresh").addEventListener("click", () => this._reset());
+    this.shadowRoot.getElementById("refresh").addEventListener("click", () => { this._loadFacets(); this._reset(); });
     this.shadowRoot.getElementById("lbx").addEventListener("click", () => this._closeLightbox());
     this._lb.addEventListener("click", (e) => { if (e.target === this._lb) this._closeLightbox(); });
     this.shadowRoot.getElementById("pairbtn").addEventListener("click", () => this._openPair());
@@ -316,7 +316,8 @@ class NvrBrowserPanel extends HTMLElement {
   // Fill the camera/object dropdowns from everything on disk, not just the
   // events loaded so far — otherwise a camera with no recent clips is missing
   // until you scroll back to one. Merge-only, so deep-link-seeded values and
-  // names from loaded events are kept.
+  // names from loaded events are kept. Called on boot and Refresh only (not every
+  // filter change): it's a whole-tree walk, and a filter change can't add names.
   async _loadFacets() {
     try {
       const data = await this._hass.callApi("GET", "nvr_browser/facets");
@@ -497,7 +498,6 @@ class NvrBrowserPanel extends HTMLElement {
     this._offset = 0;
     this._done = false;
     this._grid.innerHTML = "";
-    this._loadFacets();
     this._loadMore();
   }
 
