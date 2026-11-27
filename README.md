@@ -12,7 +12,8 @@ any file under `/config/nvr`. Thumbnails are cached to a separate dir
 
 - **Flat newest-first feed** of every clip across all cameras, infinite-scroll.
 - **Filter dropdowns** for camera and detected object (person, cat, …), both
-  derived from the existing folder layout (one entry per camera/object folder).
+  derived from the existing folder layout (one entry per camera/object folder
+  with clips anywhere on disk).
 - **Date controls** — a Day dropdown for jumping to a single day, plus a
   range-picker calendar popup that dots the days with clips and filters to an
   inclusive date range.
@@ -41,6 +42,8 @@ not exposed by HA's unauthenticated `/local/` route).
   JSON list (`start`/`end` are inclusive `YYYY-MM-DD` bounds).
 - `GET /api/nvr_browser/days` — authed JSON `{days: [...]}`, the available
   `YYYY-MM-DD` folders newest-first; powers the Day dropdown and the calendar.
+- `GET /api/nvr_browser/facets` — authed JSON `{cameras: [...], objects: [...]}`,
+  every camera / object label with clips on disk; powers the filter dropdowns.
 - `GET /api/nvr_browser/thumb?path=<rel>` — JPEG thumbnail (authed; the events
   view hands the frontend short-lived signed URLs so a plain `<img src>` still
   works only for the logged-in user; path is sanitised against traversal).

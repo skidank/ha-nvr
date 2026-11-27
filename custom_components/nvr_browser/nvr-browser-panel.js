@@ -293,7 +293,7 @@ class NvrBrowserPanel extends HTMLElement {
     this._calbtn.addEventListener("click", () => this._toggleCalendar());
     // Outside-click (close calendar) and Escape (close lightbox) live on
     // `document`, so they're registered/removed in connected/disconnectedCallback.
-    this.shadowRoot.getElementById("refresh").addEventListener("click", () => this._reset());
+    this.shadowRoot.getElementById("refresh").addEventListener("click", () => { this._loadFacets(); this._reset(); });
     this.shadowRoot.getElementById("lbx").addEventListener("click", () => this._closeLightbox());
     this._lb.addEventListener("click", (e) => { if (e.target === this._lb) this._closeLightbox(); });
     this.shadowRoot.getElementById("pairbtn").addEventListener("click", () => this._openPair());
@@ -309,7 +309,22 @@ class NvrBrowserPanel extends HTMLElement {
     this._observer.observe(this.shadowRoot.getElementById("sentinel"));
 
     this._loadDays();
+    this._loadFacets();
     this._loadMore();
+  }
+
+  // Fill the camera/object dropdowns from everything on disk, not just the
+  // events loaded so far — otherwise a camera with no recent clips is missing
+  // until you scroll back to one. Merge-only, so deep-link-seeded values and
+  // names from loaded events are kept. Called on boot and Refresh only (not every
+  // filter change): it's a whole-tree walk, and a filter change can't add names.
+  async _loadFacets() {
+    try {
+      const data = await this._hass.callApi("GET", "nvr_browser/facets");
+      this._mergeFacets((data && data.cameras) || [], (data && data.objects) || []);
+    } catch (err) {
+      /* fall back to facets discovered from loaded events */
+    }
   }
 
   async _loadDays() {
@@ -534,15 +549,20 @@ class NvrBrowserPanel extends HTMLElement {
   }
 
   _addFacets(ev) {
-    if (ev.camera && !this._cameras.has(ev.camera)) {
-      this._cameras.add(ev.camera);
-      this._renderSelect(this._cams, [...this._cameras].sort(), "_camera", "All cameras");
+    this._mergeFacets(ev.camera ? [ev.camera] : [], ev.objects || []);
+  }
+
+  // Add any new camera/object names and re-render only the dropdowns that grew.
+  _mergeFacets(cameras, objects) {
+    let camAdded = false, objAdded = false;
+    for (const c of cameras) {
+      if (c && !this._cameras.has(c)) { this._cameras.add(c); camAdded = true; }
     }
-    let added = false;
-    for (const o of ev.objects || []) {
-      if (!this._objects.has(o)) { this._objects.add(o); added = true; }
+    for (const o of objects) {
+      if (o && !this._objects.has(o)) { this._objects.add(o); objAdded = true; }
     }
-    if (added) this._renderSelect(this._objs, [...this._objects].sort(), "_object", "All objects");
+    if (camAdded) this._renderSelect(this._cams, [...this._cameras].sort(), "_camera", "All cameras");
+    if (objAdded) this._renderSelect(this._objs, [...this._objects].sort(), "_object", "All objects");
   }
 
   // Rebuild a filter <select> from the discovered facet values, keeping the

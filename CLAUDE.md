@@ -12,7 +12,7 @@ thumbnails, click-to-play lightbox) that replaces HA's clunky Media browser for
 the `/config/nvr` motion clips. It must **never** modify the recording automations
 or any file under `/config/nvr`.
 
-Current dev version: **0.9.3**. The released (HACS) version may lag this working
+Current dev version: **0.9.4**. The released (HACS) version may lag this working
 tree — bump `VERSION` when cutting a release (see Releasing).
 
 It also exposes a small **TV-pairing** API so the companion Roku app
@@ -34,14 +34,14 @@ nvr_browser/
 ├── README.md                       # user-facing: features + install steps
 └── custom_components/nvr_browser/  # the installable component (HACS / copy this folder)
     ├── manifest.json               # YAML-config integration (config_flow: false)
-    ├── __init__.py                 # async_setup: HTTP views (events/clip/thumb/proxy/cameras/live/pair) + ffmpeg thumbs/proxies + prune + panel
+    ├── __init__.py                 # async_setup: HTTP views (events/days/facets/clip/thumb/proxy/cameras/live/pair) + ffmpeg thumbs/proxies + prune + panel
     └── nvr-browser-panel.js        # vanilla custom element <nvr-browser-panel>
 ```
 
 ## Architecture
 
 - **`async_setup`** (YAML-triggered by `nvr_browser:` in configuration.yaml):
-  registers a static path for the JS, three HTTP views, the thumb cache dir, the
+  registers a static path for the JS, the HTTP views (see below), the thumb cache dir, the
   scheduled prune job, and a custom sidebar panel via
   `frontend.async_register_built_in_panel(..., "custom", ...)`.
 - **`GET /api/nvr_browser/events`** — authed JSON, newest-first, paginated.
@@ -55,6 +55,16 @@ nvr_browser/
   `YYYY-MM-DD` folders newest-first; the panel uses it to populate the Day
   dropdown, to bound the range-picker calendar, and to dot the days that have
   clips.
+- **`GET /api/nvr_browser/facets`** (0.9.4) — authed JSON `{cameras: [...],
+  objects: [...]}`, sorted: every camera / object label with a clip anywhere on
+  disk (`_list_facets`, executor). Walks the `DATE_RE` date folders like `/days`;
+  a folder holding a `BASE_RE` clip is a camera, one holding a `LINK_RE` symlink
+  is an object — only the first matching file per folder is inspected. The panel
+  calls it on boot and on the Refresh button (`_loadFacets` → `_mergeFacets`;
+  not on every filter change — it is a whole-tree walk and a filter change can't
+  add names) so a camera with no recent clips still shows in the dropdown;
+  `_addFacets` still merges names from loaded events. Facets are merge-only (never removed). Deliberately
+  NVR-tree only, not HA camera entities (some entities never record).
 - **`GET /api/nvr_browser/thumb?path=<rel>`** — **authed**, generates a cached
   ffmpeg frame-grab. A plain `<img src>` can't send a bearer token, so the events
   view signs each thumb URL (`async_sign_path`, `_SIGNED_URL_TTL` = 12h, bound to
