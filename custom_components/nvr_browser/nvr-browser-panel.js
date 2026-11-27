@@ -309,7 +309,21 @@ class NvrBrowserPanel extends HTMLElement {
     this._observer.observe(this.shadowRoot.getElementById("sentinel"));
 
     this._loadDays();
+    this._loadFacets();
     this._loadMore();
+  }
+
+  // Fill the camera/object dropdowns from everything on disk, not just the
+  // events loaded so far — otherwise a camera with no recent clips is missing
+  // until you scroll back to one. Merge-only, so deep-link-seeded values and
+  // names from loaded events are kept.
+  async _loadFacets() {
+    try {
+      const data = await this._hass.callApi("GET", "nvr_browser/facets");
+      this._mergeFacets((data && data.cameras) || [], (data && data.objects) || []);
+    } catch (err) {
+      /* fall back to facets discovered from loaded events */
+    }
   }
 
   async _loadDays() {
@@ -483,6 +497,7 @@ class NvrBrowserPanel extends HTMLElement {
     this._offset = 0;
     this._done = false;
     this._grid.innerHTML = "";
+    this._loadFacets();
     this._loadMore();
   }
 
@@ -534,15 +549,20 @@ class NvrBrowserPanel extends HTMLElement {
   }
 
   _addFacets(ev) {
-    if (ev.camera && !this._cameras.has(ev.camera)) {
-      this._cameras.add(ev.camera);
-      this._renderSelect(this._cams, [...this._cameras].sort(), "_camera", "All cameras");
+    this._mergeFacets(ev.camera ? [ev.camera] : [], ev.objects || []);
+  }
+
+  // Add any new camera/object names and re-render only the dropdowns that grew.
+  _mergeFacets(cameras, objects) {
+    let camAdded = false, objAdded = false;
+    for (const c of cameras) {
+      if (c && !this._cameras.has(c)) { this._cameras.add(c); camAdded = true; }
     }
-    let added = false;
-    for (const o of ev.objects || []) {
-      if (!this._objects.has(o)) { this._objects.add(o); added = true; }
+    for (const o of objects) {
+      if (o && !this._objects.has(o)) { this._objects.add(o); objAdded = true; }
     }
-    if (added) this._renderSelect(this._objs, [...this._objects].sort(), "_object", "All objects");
+    if (camAdded) this._renderSelect(this._cams, [...this._cameras].sort(), "_camera", "All cameras");
+    if (objAdded) this._renderSelect(this._objs, [...this._objects].sort(), "_object", "All objects");
   }
 
   // Rebuild a filter <select> from the discovered facet values, keeping the

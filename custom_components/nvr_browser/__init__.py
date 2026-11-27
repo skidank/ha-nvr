@@ -58,7 +58,7 @@ PANEL_URL_PATH = "nvr-browser"
 PANEL_TITLE = "NVR"
 PANEL_ICON = "mdi:filmstrip-box-multiple"
 WEBCOMPONENT_NAME = "nvr-browser-panel"
-VERSION = "0.9.3"
+VERSION = "0.9.4"
 
 # --- TV pairing (device-authorization flow for the Roku app) ---------------
 # A TV has no HA credentials, so it can't just call the authed events API. The
@@ -206,6 +206,48 @@ def _list_days() -> list[str]:
         return sorted((d for d in os.listdir(NVR_DIR) if DATE_RE.match(d)), reverse=True)
     except OSError:
         return []
+
+
+def _list_facets() -> dict[str, list[str]]:
+    """Every camera and object label that has a clip anywhere on disk, sorted.
+
+    Walks the DATE_RE date folders like `_list_days` (so the `today`/`yesterday`
+    aliases aren't double-counted). A folder holding a canonical `BASE_RE` clip
+    is a camera; one holding a `LINK_RE` symlink is an object label. Only the
+    first matching file per folder is inspected, so this stays a directory walk,
+    not a full file listing.
+    """
+    cameras: set[str] = set()
+    objects: set[str] = set()
+    for date in _list_days():
+        ddir = os.path.join(NVR_DIR, date)
+        try:
+            hours = [h for h in os.listdir(ddir) if HOUR_RE.match(h)]
+        except OSError:
+            continue
+        for hour in hours:
+            try:
+                folders = os.scandir(os.path.join(ddir, hour))
+            except OSError:
+                continue  # hour rotated out mid-scan
+            with folders:
+                for folder in folders:
+                    if folder.name in cameras or folder.name in objects:
+                        continue
+                    try:
+                        if not folder.is_dir():
+                            continue
+                        with os.scandir(folder.path) as files:
+                            for f in files:
+                                if BASE_RE.match(f.name):
+                                    cameras.add(folder.name)
+                                    break
+                                if LINK_RE.match(f.name):
+                                    objects.add(folder.name)
+                                    break
+                    except OSError:
+                        continue
+    return {"cameras": sorted(cameras), "objects": sorted(objects)}
 
 
 def _scan(
@@ -569,6 +611,21 @@ class NvrDaysView(HomeAssistantView):
         return self.json({"days": days})
 
 
+class NvrFacetsView(HomeAssistantView):
+    """Authed list of every camera / object label with clips on disk, so the
+    panel's filter dropdowns are complete before the matching events load."""
+
+    url = "/api/nvr_browser/facets"
+    name = "api:nvr_browser:facets"
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        facets = await self.hass.async_add_executor_job(_list_facets)
+        return self.json(facets)
+
+
 class NvrThumbView(HomeAssistantView):
     """Cached JPEG thumbnail. Authed (the default): the event list hands the
     frontend signed URLs so a plain <img src> still loads only for the
@@ -886,6 +943,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     hass.http.register_view(NvrEventsView(hass))
     hass.http.register_view(NvrDaysView(hass))
+    hass.http.register_view(NvrFacetsView(hass))
     hass.http.register_view(NvrThumbView(hass))
     hass.http.register_view(NvrClipView(hass))
     hass.http.register_view(NvrClipProxyView(hass))
